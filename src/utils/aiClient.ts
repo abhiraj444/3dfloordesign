@@ -1,5 +1,5 @@
 import { FloorPlanData, LLMProviderConfig } from '../types';
-import { PROVIDERS } from '../data/llmProviders';
+import { PROVIDERS, getDefaultLLMConfig, getSavedLLMConfig } from '../data/llmProviders';
 
 export const ARCHITECTURAL_SYSTEM_PROMPT = `You are an expert architectural floor plan parser specialized in residential builder plans and blueprints.
 Your task is to analyze the 2D floor plan image and extract a complete, mathematically coherent 3D-ready architectural layout in JSON matching the exact schema below.
@@ -401,8 +401,10 @@ export async function extractFloorPlan(
   selectedImage: string,
   mimeType: string,
   userPrompt: string | undefined,
-  config: LLMProviderConfig
+  config?: LLMProviderConfig
 ): Promise<FloorPlanData> {
+  const safeConfig = config || getSavedLLMConfig() || getDefaultLLMConfig();
+
   try {
     const response = await fetch('/api/extract', {
       method: 'POST',
@@ -413,7 +415,7 @@ export async function extractFloorPlan(
         imageBase64: selectedImage,
         mimeType,
         userPrompt: userPrompt?.trim() || undefined,
-        providerConfig: config,
+        providerConfig: safeConfig,
       }),
     });
 
@@ -431,9 +433,9 @@ export async function extractFloorPlan(
       // If other error, try client side fallback
     }
 
-    return await extractDirectClient(selectedImage, mimeType, userPrompt, config);
+    return await extractDirectClient(selectedImage, mimeType, userPrompt, safeConfig);
   } catch (err: any) {
     console.warn('Backend proxy extraction failed, attempting direct client extraction...', err);
-    return await extractDirectClient(selectedImage, mimeType, userPrompt, config);
+    return await extractDirectClient(selectedImage, mimeType, userPrompt, safeConfig);
   }
 }
