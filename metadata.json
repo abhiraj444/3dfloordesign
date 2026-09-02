@@ -1,0 +1,6 @@
+{
+  "name": "Floor Plan 3D Visualizer",
+  "description": "Convert 2D architectural floor plans into interactive multi-floor 3D models with manual floor builder, staircase navigation, furnished rooms, and first-person walkthrough.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
