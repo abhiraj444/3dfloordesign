@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { FloorPlanData, LLMProviderConfig } from '../types';
 import { SAMPLE_PLANS } from '../data/samples';
 import { PROVIDERS } from '../data/llmProviders';
+import { extractFloorPlan } from '../utils/aiClient';
 import {
   Upload,
   Sparkles,
@@ -91,35 +92,19 @@ export const Uploader: React.FC<UploaderProps> = ({
     }, 1400);
 
     try {
-      const response = await fetch('/api/extract', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          imageBase64: selectedImage,
-          mimeType,
-          userPrompt: userPrompt.trim() || undefined,
-          providerConfig: llmConfig,
-        }),
-      });
-
-      const data = await response.json();
-
+      const plan = await extractFloorPlan(selectedImage, mimeType, userPrompt, llmConfig);
       clearInterval(interval);
-
-      if (!response.ok || !data.success) {
-        if (data.needsApiKey) {
-          onOpenSettings();
-        }
-        throw new Error(data.error || 'Failed to extract floor plan from image.');
-      }
-
-      onPlanExtracted(data.data, selectedImage);
+      onPlanExtracted(plan, selectedImage);
     } catch (err: any) {
       clearInterval(interval);
       console.error('AI extraction error:', err);
-      setError(err.message || 'Error occurred while processing the floor plan image.');
+      const msg = err.message || 'Error occurred while processing the floor plan image.';
+      if (msg.includes('API key') || msg.includes('unauthorized') || msg.includes('401')) {
+        setError(msg);
+        onOpenSettings();
+      } else {
+        setError(msg);
+      }
     } finally {
       setIsExtracting(false);
     }

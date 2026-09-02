@@ -277,23 +277,34 @@ async function startServer() {
 
         const endpoint = testUrl.endsWith('/') ? `${testUrl}chat/completions` : `${testUrl}/chat/completions`;
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+        if (apiKey) headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+        if (endpoint.includes('openrouter.ai')) {
+          headers['HTTP-Referer'] = 'https://ai.studio';
+          headers['X-Title'] = 'Floor Plan 3D Visualizer';
+        }
 
         const testRes = await fetch(endpoint, {
           method: 'POST',
           headers,
           body: JSON.stringify({
             model: model || (provider === 'groq' ? 'llama-3.2-11b-vision-preview' : 'google/gemini-2.5-flash'),
-            messages: [{ role: 'user', content: 'Hello, respond with OK.' }],
+            messages: [{ role: 'user', content: 'Respond with OK.' }],
             max_tokens: 10,
           }),
         });
 
         if (!testRes.ok) {
           const errText = await testRes.text();
+          let parsedError = errText;
+          try {
+            const errObj = JSON.parse(errText);
+            parsedError = errObj.error?.message || errObj.message || errText;
+          } catch {
+            parsedError = errText.slice(0, 300);
+          }
           return res.status(testRes.status).json({
             success: false,
-            error: `Provider test failed (${testRes.status}): ${errText}`,
+            error: `Provider test failed (${testRes.status}): ${parsedError}`,
           });
         }
 

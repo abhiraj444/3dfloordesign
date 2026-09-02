@@ -1,5 +1,11 @@
 import { LLMProviderConfig, LLMProviderType, ModelPreset } from '../types';
 
+export interface EndpointPreset {
+  name: string;
+  url: string;
+  description?: string;
+}
+
 export interface ProviderMeta {
   id: LLMProviderType;
   name: string;
@@ -9,6 +15,7 @@ export interface ProviderMeta {
   keyUrl: string;
   keyPlaceholder: string;
   popularModels: ModelPreset[];
+  endpointPresets: EndpointPreset[];
   description: string;
 }
 
@@ -22,6 +29,10 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
     keyUrl: 'https://openrouter.ai/keys',
     keyPlaceholder: 'sk-or-v1-...',
     description: 'Use OpenRouter with Gemini 2.5 Flash, Claude 3.5 Sonnet, GPT-4o, Llama 3.2 Vision, and more.',
+    endpointPresets: [
+      { name: 'Default OpenRouter v1', url: 'https://openrouter.ai/api/v1', description: 'Recommended official endpoint' },
+      { name: 'OpenRouter Root API', url: 'https://openrouter.ai/api', description: 'Alternative base path' },
+    ],
     popularModels: [
       {
         id: 'google/gemini-2.5-flash',
@@ -76,6 +87,9 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
     keyUrl: 'https://console.groq.com/keys',
     keyPlaceholder: 'gsk_...',
     description: 'Ultra fast inference on Groq Cloud using Llama 3.2 multimodal vision models.',
+    endpointPresets: [
+      { name: 'Default Groq OpenAI v1', url: 'https://api.groq.com/openai/v1', description: 'Official fast LPU endpoint' },
+    ],
     popularModels: [
       {
         id: 'llama-3.2-90b-vision-preview',
@@ -102,6 +116,9 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
     keyUrl: 'https://aistudio.google.com/app/apikey',
     keyPlaceholder: 'AIzaSy...',
     description: 'Direct access to Google Gemini models with native multimodal spatial parsing.',
+    endpointPresets: [
+      { name: 'Google Generative Language API', url: 'https://generativelanguage.googleapis.com', description: 'Default Google Gemini API' },
+    ],
     popularModels: [
       {
         id: 'gemini-2.5-flash',
@@ -135,6 +152,9 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
     keyUrl: 'https://platform.openai.com/api-keys',
     keyPlaceholder: 'sk-proj-...',
     description: 'Direct OpenAI API integration for GPT-4o and GPT-4o-mini vision models.',
+    endpointPresets: [
+      { name: 'Default OpenAI v1', url: 'https://api.openai.com/v1', description: 'Official OpenAI endpoint' },
+    ],
     popularModels: [
       {
         id: 'gpt-4o',
@@ -155,12 +175,18 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
   custom: {
     id: 'custom',
     name: 'Custom / Local API',
-    tagline: 'Any OpenAI-compatible endpoint (Ollama, vLLM, LMStudio, LocalAI)',
+    tagline: 'Any OpenAI-compatible endpoint (Ollama, vLLM, LMStudio, LocalAI, Proxy)',
     defaultBaseUrl: 'http://localhost:11434/v1',
     defaultModel: 'llava:latest',
     keyUrl: '',
     keyPlaceholder: 'Optional API key or leave blank for local',
     description: 'Connect to your self-hosted local LLM or custom OpenAI-compatible proxy.',
+    endpointPresets: [
+      { name: 'Ollama (Localhost)', url: 'http://localhost:11434/v1', description: 'Default Ollama v1 API' },
+      { name: 'LM Studio (Localhost)', url: 'http://localhost:1234/v1', description: 'LM Studio local server' },
+      { name: 'vLLM / TextGen WebUI', url: 'http://localhost:8000/v1', description: 'Standard vLLM port' },
+      { name: 'LocalAI', url: 'http://localhost:8080/v1', description: 'LocalAI endpoint' },
+    ],
     popularModels: [
       {
         id: 'llava:latest',
@@ -174,6 +200,13 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         name: 'MiniCPM-V (Local)',
         provider: 'custom',
         description: 'High performance edge vision model',
+        supportsVision: true,
+      },
+      {
+        id: 'qwen2-vl:7b',
+        name: 'Qwen 2 VL (Local)',
+        provider: 'custom',
+        description: 'Local blueprint and floor plan parser',
         supportsVision: true,
       },
     ],

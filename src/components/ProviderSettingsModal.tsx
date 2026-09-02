@@ -14,9 +14,12 @@ import {
   RotateCcw,
   Check,
   Server,
+  Link,
+  RefreshCw,
 } from 'lucide-react';
 import { LLMProviderConfig, LLMProviderType } from '../types';
 import { PROVIDERS, getDefaultLLMConfig, saveLLMConfig } from '../data/llmProviders';
+import { testProviderConnection, resolveEndpointUrl } from '../utils/aiClient';
 
 interface ProviderSettingsModalProps {
   isOpen: boolean;
@@ -35,12 +38,20 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
   const [showKey, setShowKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [customModelInput, setCustomModelInput] = useState('');
-  const [isCustomModel, setIsCustomModel] = useState(false);
+  
+  // Custom Model State
+  const [isCustomModel, setIsCustomModel] = useState(
+    !PROVIDERS[initialConfig.provider]?.popularModels.some((m) => m.id === initialConfig.model)
+  );
+  
+  // Custom Endpoint State
+  const currentProvider = PROVIDERS[formConfig.provider] || PROVIDERS.openrouter;
+  const isDefaultEndpoint = (formConfig.baseUrl || currentProvider.defaultBaseUrl) === currentProvider.defaultBaseUrl;
+  const [isCustomEndpoint, setIsCustomEndpoint] = useState(
+    formConfig.provider === 'custom' || !isDefaultEndpoint
+  );
 
   if (!isOpen) return null;
-
-  const currentProvider = PROVIDERS[formConfig.provider] || PROVIDERS.openrouter;
 
   const handleProviderSelect = (pId: LLMProviderType) => {
     const pMeta = PROVIDERS[pId];
@@ -51,6 +62,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
       baseUrl: pMeta.defaultBaseUrl,
     }));
     setIsCustomModel(false);
+    setIsCustomEndpoint(pId === 'custom');
     setTestResult(null);
   };
 
@@ -58,30 +70,14 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
     setIsTesting(true);
     setTestResult(null);
 
-    try {
-      const response = await fetch('/api/test-provider', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: formConfig.provider,
-          apiKey: formConfig.apiKey,
-          model: formConfig.model,
-          baseUrl: formConfig.baseUrl,
-        }),
-      });
+    const activeConfig: LLMProviderConfig = {
+      ...formConfig,
+      baseUrl: formConfig.baseUrl || currentProvider.defaultBaseUrl,
+    };
 
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setTestResult({
-          success: true,
-          message: data.message || 'Connection test successful! Model is ready for floor plan vision extraction.',
-        });
-      } else {
-        setTestResult({
-          success: false,
-          message: data.error || 'Failed to authenticate with provider. Please verify your API key and model.',
-        });
-      }
+    try {
+      const result = await testProviderConnection(activeConfig);
+      setTestResult(result);
     } catch (err: any) {
       setTestResult({
         success: false,
@@ -93,10 +89,10 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
   };
 
   const handleSaveAndClose = () => {
-    const finalConfig = { ...formConfig };
-    if (isCustomModel && customModelInput.trim()) {
-      finalConfig.model = customModelInput.trim();
-    }
+    const finalConfig: LLMProviderConfig = {
+      ...formConfig,
+      baseUrl: (formConfig.baseUrl && formConfig.baseUrl.trim()) || currentProvider.defaultBaseUrl,
+    };
     saveLLMConfig(finalConfig);
     onSave(finalConfig);
     onClose();
@@ -106,13 +102,16 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
     const def = getDefaultLLMConfig();
     setFormConfig(def);
     setIsCustomModel(false);
+    setIsCustomEndpoint(false);
     setTestResult(null);
   };
+
+  const resolvedFullEndpoint = resolveEndpointUrl(formConfig.baseUrl, formConfig.provider);
 
   return (
     <div
       id="llm-provider-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 md:p-6 overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 md:p-6 overflow-y-auto"
     >
       <div
         id="llm-provider-modal-container"
@@ -129,7 +128,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 AI Provider & Vision Settings
               </h2>
               <p className="text-xs text-neutral-400">
-                Configure your own API keys for OpenRouter, Groq, Gemini, OpenAI or Custom LLM
+                Configure API keys, custom models, and custom endpoints for OpenRouter, Groq, Gemini, OpenAI, or local LLMs
               </p>
             </div>
           </div>
@@ -199,7 +198,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
               <input
                 id="llm-api-key-input"
                 type={showKey ? 'text' : 'password'}
-                value={formConfig.apiKey}
+                value={formConfig.apiKey || ''}
                 onChange={(e) => {
                   setFormConfig((prev) => ({ ...prev, apiKey: e.target.value }));
                   setTestResult(null);
@@ -221,7 +220,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
             </p>
           </div>
 
-          {/* Model Selection */}
+          {/* Vision Model Selection */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -229,9 +228,10 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 Vision Model Selection
               </label>
               <button
+                id="toggle-custom-model-btn"
                 type="button"
                 onClick={() => setIsCustomModel(!isCustomModel)}
-                className="text-xs text-neutral-400 hover:text-neutral-200 underline"
+                className="text-xs text-amber-400 hover:text-amber-300 underline font-medium"
               >
                 {isCustomModel ? 'Choose from presets' : 'Enter custom model name'}
               </button>
@@ -278,16 +278,20 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 })}
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-2 bg-neutral-800/40 border border-neutral-800 rounded-xl p-3.5">
+                <div className="flex items-center justify-between text-xs text-neutral-300 font-medium">
+                  <span>Custom Model Identifier</span>
+                  <span className="text-neutral-500 text-[11px]">e.g. google/gemini-2.5-flash</span>
+                </div>
                 <input
                   id="custom-model-input"
                   type="text"
-                  value={formConfig.model}
+                  value={formConfig.model || ''}
                   onChange={(e) => {
                     setFormConfig((prev) => ({ ...prev, model: e.target.value }));
                     setTestResult(null);
                   }}
-                  placeholder="e.g. meta-llama/llama-3.2-90b-vision-instruct or mistralai/pixtral-12b"
+                  placeholder="e.g. meta-llama/llama-3.2-90b-vision-instruct, mistralai/pixtral-12b, or gpt-4o"
                   className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"
                 />
                 <p className="text-[11px] text-neutral-400">
@@ -297,23 +301,100 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
             )}
           </div>
 
-          {/* Custom Base URL (shown for Custom provider or advanced users) */}
-          {(formConfig.provider === 'custom' || formConfig.baseUrl !== currentProvider.defaultBaseUrl) && (
-            <div className="space-y-2 bg-neutral-800/40 border border-neutral-800 rounded-xl p-4">
-              <label className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+          {/* API Endpoint & Base URL Selection (Editable for All Providers) */}
+          <div className="space-y-3 bg-neutral-800/40 border border-neutral-800 rounded-xl p-4">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-neutral-200 uppercase tracking-wider flex items-center gap-1.5">
                 <Globe className="w-3.5 h-3.5 text-amber-400" />
-                API Base URL
+                API Endpoint & Base URL
               </label>
-              <input
-                id="llm-base-url-input"
-                type="text"
-                value={formConfig.baseUrl || ''}
-                onChange={(e) => setFormConfig((prev) => ({ ...prev, baseUrl: e.target.value }))}
-                placeholder="http://localhost:11434/v1"
-                className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3.5 py-2 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-amber-500 font-mono"
-              />
+              <div className="flex items-center gap-2">
+                {formConfig.baseUrl && formConfig.baseUrl !== currentProvider.defaultBaseUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormConfig((prev) => ({ ...prev, baseUrl: currentProvider.defaultBaseUrl }));
+                      setTestResult(null);
+                    }}
+                    className="text-[11px] text-neutral-400 hover:text-amber-400 flex items-center gap-1"
+                    title="Reset to default endpoint"
+                  >
+                    <RefreshCw className="w-3 h-3" /> Reset Default
+                  </button>
+                )}
+                <button
+                  id="toggle-custom-endpoint-btn"
+                  type="button"
+                  onClick={() => setIsCustomEndpoint(!isCustomEndpoint)}
+                  className="text-xs text-amber-400 hover:text-amber-300 underline font-medium"
+                >
+                  {isCustomEndpoint ? 'Choose preset endpoint' : 'Edit custom endpoint'}
+                </button>
+              </div>
             </div>
-          )}
+
+            {!isCustomEndpoint ? (
+              <div className="space-y-1.5">
+                {currentProvider.endpointPresets?.map((ep) => {
+                  const currentBase = formConfig.baseUrl || currentProvider.defaultBaseUrl;
+                  const isSelected = currentBase === ep.url;
+                  return (
+                    <button
+                      key={ep.url}
+                      type="button"
+                      onClick={() => {
+                        setFormConfig((prev) => ({ ...prev, baseUrl: ep.url }));
+                        setTestResult(null);
+                      }}
+                      className={`w-full flex items-center justify-between p-2.5 rounded-lg border text-left transition-all ${
+                        isSelected
+                          ? 'bg-amber-500/10 border-amber-500/50 text-white'
+                          : 'bg-neutral-900/60 border-neutral-800 hover:border-neutral-700 text-neutral-300'
+                      }`}
+                    >
+                      <div>
+                        <div className="text-xs font-semibold text-neutral-200">{ep.name}</div>
+                        <div className="text-[11px] text-neutral-400 font-mono mt-0.5">{ep.url}</div>
+                      </div>
+                      <div
+                        className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                          isSelected ? 'border-amber-500 bg-amber-500' : 'border-neutral-600'
+                        }`}
+                      >
+                        {isSelected && <div className="w-1 h-1 rounded-full bg-black" />}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <input
+                  id="llm-base-url-input"
+                  type="text"
+                  value={formConfig.baseUrl || ''}
+                  onChange={(e) => {
+                    setFormConfig((prev) => ({ ...prev, baseUrl: e.target.value }));
+                    setTestResult(null);
+                  }}
+                  placeholder={currentProvider.defaultBaseUrl || 'https://openrouter.ai/api/v1'}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"
+                />
+                <p className="text-[11px] text-neutral-400">
+                  Custom OpenAI-compatible base URL (e.g., custom reverse proxy, self-hosted Ollama, or alternative gateway).
+                </p>
+              </div>
+            )}
+
+            {/* Resolved URL Preview */}
+            <div className="pt-2 border-t border-neutral-800/80 flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <Server className="w-3.5 h-3.5 text-amber-400/70 shrink-0" />
+              <span>Target route:</span>
+              <code className="text-neutral-300 font-mono text-[11px] truncate bg-neutral-900 px-1.5 py-0.5 rounded border border-neutral-800">
+                {resolvedFullEndpoint}
+              </code>
+            </div>
+          </div>
 
           {/* Test Status Banner */}
           {testResult && (
@@ -330,8 +411,8 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
               )}
               <div className="text-xs leading-relaxed">
-                <p className="font-semibold mb-0.5">{testResult.success ? 'Ready to parse' : 'Configuration Issue'}</p>
-                <p>{testResult.message}</p>
+                <p className="font-semibold mb-0.5">{testResult.success ? 'Connection Verified' : 'Configuration Issue'}</p>
+                <p className="break-words">{testResult.message}</p>
               </div>
             </div>
           )}
@@ -356,7 +437,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
               type="button"
               onClick={handleResetDefaults}
               className="p-2 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 text-xs flex items-center gap-1"
-              title="Reset defaults"
+              title="Reset all settings to defaults"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
