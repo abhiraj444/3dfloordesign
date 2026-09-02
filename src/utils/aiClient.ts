@@ -53,25 +53,88 @@ JSON Schema format to output:
   ]
 }
 
-Respond ONLY with valid JSON. Do not include markdown code block backticks or conversational text.`;
+CRITICAL RULES:
+- Output ONLY the raw JSON object starting with '{' and ending with '}'.
+- DO NOT output any preamble, safety commentary (such as "User Safety: safe"), markdown wrappers, explanation, or conversational text.`;
+
+function cleanJsonString(str: string): string {
+  return str
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
+function relaxJson(str: string): string {
+  return str
+    // Remove single line comments
+    .replace(/\/\/.*$/gm, '')
+    // Remove multi-line comments
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    // Remove trailing commas before closing braces/brackets
+    .replace(/,\s*([}\]])/g, '$1')
+    .trim();
+}
 
 export function sanitizeFloorPlanJSON(rawText: string): FloorPlanData {
-  let cleaned = rawText.trim();
-  // Strip markdown code fences if present
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```\s*/i, '').replace(/\s*```$/, '');
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('Empty response received from AI model.');
   }
 
-  // Find first '{' and last '}'
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  let text = rawText.trim();
+  let parsedData: any = null;
+
+  // 1. Try direct parsing
+  try {
+    parsedData = JSON.parse(text);
+  } catch {
+    // 2. Try extracting from markdown code block
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeBlockMatch && codeBlockMatch[1]) {
+      try {
+        parsedData = JSON.parse(cleanJsonString(codeBlockMatch[1]));
+      } catch {
+        try {
+          parsedData = JSON.parse(relaxJson(codeBlockMatch[1]));
+        } catch {
+          // Continue to next extraction method
+        }
+      }
+    }
+
+    // 3. Extract between the first '{' and the last '}'
+    if (!parsedData) {
+      const firstBrace = text.indexOf('{');
+      const lastBrace = text.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const candidate = text.slice(firstBrace, lastBrace + 1);
+        try {
+          parsedData = JSON.parse(cleanJsonString(candidate));
+        } catch {
+          try {
+            parsedData = JSON.parse(relaxJson(candidate));
+          } catch {
+            // Continue
+          }
+        }
+      }
+    }
+
+    // 4. Regex greedy object match
+    if (!parsedData) {
+      const objectMatch = text.match(/\{[\s\S]*\}/);
+      if (objectMatch) {
+        try {
+          parsedData = JSON.parse(relaxJson(objectMatch[0]));
+        } catch {
+          // Continue
+        }
+      }
+    }
   }
 
-  const parsedData = JSON.parse(cleaned);
+  if (!parsedData || typeof parsedData !== 'object') {
+    throw new Error(`Failed to parse architectural JSON from AI model. Response was: ${text.slice(0, 150)}...`);
+  }
 
   if (!parsedData.unit) parsedData.unit = 'feet';
   if (!parsedData.wall_thickness_ft) parsedData.wall_thickness_ft = 0.5;
@@ -386,9 +449,15 @@ async function extractDirectClient(
     throw new Error(`Vision extraction request failed (${res.status}): ${errMsg}`);
   }
 
-  const rawContent = parsed.data?.choices?.[0]?.message?.content;
+  let rawContent = parsed.data?.choices?.[0]?.message?.content;
   if (!rawContent) {
     throw new Error('No structured JSON returned by the model.');
+  }
+
+  if (Array.isArray(rawContent)) {
+    rawContent = rawContent.map((c: any) => (typeof c === 'string' ? c : c.text || '')).join('\n');
+  } else if (typeof rawContent !== 'string') {
+    rawContent = JSON.stringify(rawContent);
   }
 
   return sanitizeFloorPlanJSON(rawContent);
@@ -439,3 +508,134 @@ export async function extractFloorPlan(
     return await extractDirectClient(selectedImage, mimeType, userPrompt, safeConfig);
   }
 }
+
+/**
+ * Universal Floor Plan Streaming: Streams live input payload, reasoning tokens, and raw content tokens
+ * to feed the 3-Box Response Inspector in real-time.
+ */
+export async function extractFloorPlanStream(
+  selectedImage: string,
+  mimeType: string,
+  userPrompt: string | undefined,
+  config: LLMProviderConfig | undefined,
+  callbacks: {
+    onInput?: (input: import('../types').AIStreamInputPayload) => void;
+    onReasoningChunk?: (chunk: string, accumulated: string) => void;
+    onContentChunk?: (chunk: string, accumulated: string) => void;
+    onDone?: (plan: FloorPlanData, rawText: string) => void;
+    onError?: (error: string) => void;
+  }
+): Promise<FloorPlanData> {
+  const safeConfig = config || getSavedLLMConfig() || getDefaultLLMConfig();
+  const base64Clean = selectedImage.replace(/^data:image\/[a-z]+;base64,/, '');
+  const approxKb = Math.round((base64Clean.length * 0.75) / 1024);
+
+  // Initial local input dispatch
+  callbacks.onInput?.({
+    provider: safeConfig.provider,
+    model: safeConfig.model || 'default',
+    baseUrl: safeConfig.baseUrl,
+    systemInstruction: ARCHITECTURAL_SYSTEM_PROMPT,
+    userPrompt: userPrompt?.trim() || undefined,
+    imageInfo: {
+      mimeType,
+      sizeKb: approxKb,
+      previewUrl: selectedImage.startsWith('data:') ? selectedImage : `data:${mimeType};base64,${base64Clean}`,
+    },
+    temperature: safeConfig.temperature || 0.1,
+    enableReasoning: safeConfig.enableReasoning ?? true,
+  });
+
+  try {
+    const response = await fetch('/api/extract-stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        imageBase64: selectedImage,
+        mimeType,
+        userPrompt: userPrompt?.trim() || undefined,
+        providerConfig: safeConfig,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP Error ${response.status} from streaming endpoint`);
+    }
+
+    if (!response.body) {
+      throw new Error('No streaming response body received.');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let accumulatedReasoning = '';
+    let accumulatedContent = '';
+    let finalPlan: FloorPlanData | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const dataStr = trimmed.slice(6);
+        if (dataStr === '[DONE]') continue;
+
+        try {
+          const event = JSON.parse(dataStr);
+          if (event.type === 'input' && event.payload) {
+            callbacks.onInput?.(event.payload);
+          } else if (event.type === 'reasoning') {
+            accumulatedReasoning = event.accumulated || (accumulatedReasoning + (event.chunk || ''));
+            callbacks.onReasoningChunk?.(event.chunk || '', accumulatedReasoning);
+          } else if (event.type === 'content') {
+            accumulatedContent = event.accumulated || (accumulatedContent + (event.chunk || ''));
+            callbacks.onContentChunk?.(event.chunk || '', accumulatedContent);
+          } else if (event.type === 'done') {
+            finalPlan = event.plan;
+            callbacks.onDone?.(event.plan, event.rawText || accumulatedContent);
+          } else if (event.type === 'error') {
+            throw new Error(event.error || 'Server streaming error occurred.');
+          }
+        } catch (e: any) {
+          if (e.message && e.message.includes('Server streaming error')) throw e;
+          // Ignore individual malformed chunk parse errors
+        }
+      }
+    }
+
+    if (finalPlan) {
+      return finalPlan;
+    }
+
+    if (accumulatedContent) {
+      const parsed = sanitizeFloorPlanJSON(accumulatedContent);
+      callbacks.onDone?.(parsed, accumulatedContent);
+      return parsed;
+    }
+
+    throw new Error('No architectural data received during stream.');
+  } catch (err: any) {
+    console.warn('SSE Streaming failed, falling back to direct extraction...', err);
+    try {
+      const directPlan = await extractFloorPlan(selectedImage, mimeType, userPrompt, safeConfig);
+      const jsonStr = JSON.stringify(directPlan, null, 2);
+      callbacks.onContentChunk?.(jsonStr, jsonStr);
+      callbacks.onDone?.(directPlan, jsonStr);
+      return directPlan;
+    } catch (fallbackErr: any) {
+      const errorMsg = fallbackErr.message || err.message || 'Floor plan extraction failed.';
+      callbacks.onError?.(errorMsg);
+      throw fallbackErr;
+    }
+  }
+}
+

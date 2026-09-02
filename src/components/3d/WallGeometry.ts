@@ -231,7 +231,7 @@ export function buildArchitecturalModel(
   };
 
   // Helper to create a single solid wall mesh
-  const createWallBox = (cx: number, cy: number, cz: number, w: number, h: number, d: number) => {
+  const createWallBox = (cx: number, cy: number, cz: number, w: number, h: number, d: number, isLintel = false) => {
     if (w <= 0.05 || d <= 0.05) return;
     const geo = new THREE.BoxGeometry(w, h, d);
     const mesh = new THREE.Mesh(geo, wallMat);
@@ -240,10 +240,12 @@ export function buildArchitecturalModel(
     mesh.receiveShadow = true;
     group.add(mesh);
 
-    // Add to collision
-    const box = new THREE.Box3();
-    box.setFromCenterAndSize(new THREE.Vector3(cx, elevationOffset + cy, cz), new THREE.Vector3(w, h, d));
-    collisionBoxes.push(box);
+    // Only add solid walkable height walls to collision boxes (lintels above 7ft do not block player)
+    if (!isLintel) {
+      const box = new THREE.Box3();
+      box.setFromCenterAndSize(new THREE.Vector3(cx, elevationOffset + cy, cz), new THREE.Vector3(w, h, d));
+      collisionBoxes.push(box);
+    }
   };
 
   // Process raw walls
@@ -293,7 +295,7 @@ export function buildArchitecturalModel(
         // Wall Lintel above door
         const lintelHeight = wallHeight - doorHeight;
         if (lintelHeight > 0) {
-          createWallBox(doorCenterX, doorHeight + lintelHeight / 2, y, doorWidth, lintelHeight, wallThickness);
+          createWallBox(doorCenterX, doorHeight + lintelHeight / 2, y, doorWidth, lintelHeight, wallThickness, true);
         }
 
         // 3D Door Frame & Panel
@@ -314,7 +316,7 @@ export function buildArchitecturalModel(
         createWallBox(winCenterX, winSill / 2, y, winWidth, winSill, wallThickness);
         // Top Lintel
         const topH = wallHeight - (winSill + winHeight);
-        if (topH > 0) createWallBox(winCenterX, winSill + winHeight + topH / 2, y, winWidth, topH, wallThickness);
+        if (topH > 0) createWallBox(winCenterX, winSill + winHeight + topH / 2, y, winWidth, topH, wallThickness, true);
 
         // 3D Window Frame & Glass
         create3DWindow(winCenterX, elevationOffset + winSill + winHeight / 2, y, winWidth, winHeight, 'horizontal', group);
@@ -345,7 +347,7 @@ export function buildArchitecturalModel(
         // Lintel above door
         const lintelHeight = wallHeight - doorHeight;
         if (lintelHeight > 0) {
-          createWallBox(x, doorHeight + lintelHeight / 2, doorCenterY, wallThickness, lintelHeight, doorWidth);
+          createWallBox(x, doorHeight + lintelHeight / 2, doorCenterY, wallThickness, lintelHeight, doorWidth, true);
         }
 
         // 3D Door Frame & Panel
@@ -366,7 +368,7 @@ export function buildArchitecturalModel(
         createWallBox(x, winSill / 2, winCenterY, wallThickness, winSill, winWidth);
         // Top Lintel
         const topH = wallHeight - (winSill + winHeight);
-        if (topH > 0) createWallBox(x, winSill + winHeight + topH / 2, winCenterY, wallThickness, topH, winWidth);
+        if (topH > 0) createWallBox(x, winSill + winHeight + topH / 2, winCenterY, wallThickness, topH, winWidth, true);
 
         // 3D Window Frame & Glass
         create3DWindow(x, elevationOffset + winSill + winHeight / 2, winCenterY, winWidth, winHeight, 'vertical', group);

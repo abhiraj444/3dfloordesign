@@ -38,15 +38,17 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         id: 'google/gemini-2.5-flash',
         name: 'Google Gemini 2.5 Flash (Fast & Accurate)',
         provider: 'openrouter',
-        description: 'Recommended for architectural plans',
+        description: 'Recommended for architectural plans with reasoning',
         supportsVision: true,
+        supportsReasoning: true,
       },
       {
-        id: 'google/gemini-2.0-flash-001',
-        name: 'Google Gemini 2.0 Flash',
+        id: 'anthropic/claude-3.7-sonnet:thinking',
+        name: 'Anthropic Claude 3.7 Sonnet (Thinking CoT)',
         provider: 'openrouter',
-        description: 'High speed multimodal model',
+        description: 'Elite spatial reasoning with step-by-step thinking trace',
         supportsVision: true,
+        supportsReasoning: true,
       },
       {
         id: 'anthropic/claude-3.5-sonnet',
@@ -54,6 +56,7 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         provider: 'openrouter',
         description: 'Top-tier visual spatial reasoning',
         supportsVision: true,
+        supportsReasoning: true,
       },
       {
         id: 'openai/gpt-4o',
@@ -61,19 +64,21 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         provider: 'openrouter',
         description: 'Omni multimodal vision model',
         supportsVision: true,
-      },
-      {
-        id: 'meta-llama/llama-3.2-90b-vision-instruct',
-        name: 'Llama 3.2 90B Vision',
-        provider: 'openrouter',
-        description: 'Open source high parameter vision model',
-        supportsVision: true,
+        supportsReasoning: true,
       },
       {
         id: 'qwen/qwen-2.5-vl-72b-instruct',
         name: 'Qwen 2.5 VL 72B',
         provider: 'openrouter',
         description: 'Exceptional document & blueprint parsing',
+        supportsVision: true,
+        supportsReasoning: true,
+      },
+      {
+        id: 'meta-llama/llama-3.2-90b-vision-instruct',
+        name: 'Llama 3.2 90B Vision',
+        provider: 'openrouter',
+        description: 'Open source high parameter vision model',
         supportsVision: true,
       },
     ],
@@ -115,17 +120,18 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
     defaultModel: 'gemini-2.5-flash',
     keyUrl: 'https://aistudio.google.com/app/apikey',
     keyPlaceholder: 'AIzaSy...',
-    description: 'Direct access to Google Gemini models with native multimodal spatial parsing.',
+    description: 'Direct access to Google Gemini models with native multimodal spatial parsing and thinking.',
     endpointPresets: [
       { name: 'Google Generative Language API', url: 'https://generativelanguage.googleapis.com', description: 'Default Google Gemini API' },
     ],
     popularModels: [
       {
         id: 'gemini-2.5-flash',
-        name: 'Gemini 2.5 Flash',
+        name: 'Gemini 2.5 Flash (Recommended)',
         provider: 'gemini',
-        description: 'Default flagship model with structured schema output',
+        description: 'Flagship multimodal vision model with high spatial accuracy',
         supportsVision: true,
+        supportsReasoning: true,
       },
       {
         id: 'gemini-2.0-flash',
@@ -133,13 +139,15 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         provider: 'gemini',
         description: 'Fast multimodal spatial extraction',
         supportsVision: true,
+        supportsReasoning: true,
       },
       {
         id: 'gemini-1.5-pro',
         name: 'Gemini 1.5 Pro',
         provider: 'gemini',
-        description: 'Complex floor plan & dimension verification',
+        description: 'Complex architectural plan & dimension verification',
         supportsVision: true,
+        supportsReasoning: true,
       },
     ],
   },
@@ -162,6 +170,7 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         provider: 'openai',
         description: 'High fidelity multimodal reasoning',
         supportsVision: true,
+        supportsReasoning: true,
       },
       {
         id: 'gpt-4o-mini',
@@ -169,6 +178,7 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         provider: 'openai',
         description: 'Fast, cost-effective vision model',
         supportsVision: true,
+        supportsReasoning: true,
       },
     ],
   },
@@ -208,45 +218,153 @@ export const PROVIDERS: Record<LLMProviderType, ProviderMeta> = {
         provider: 'custom',
         description: 'Local blueprint and floor plan parser',
         supportsVision: true,
+        supportsReasoning: true,
       },
     ],
   },
 };
 
-const STORAGE_KEY = 'floorplan_ai_llm_config';
+const VAULT_STORAGE_KEY = 'floorplan_ai_providers_vault_v2';
+const ACTIVE_PROVIDER_KEY = 'floorplan_ai_active_provider_v2';
+const LEGACY_STORAGE_KEY = 'floorplan_ai_llm_config';
 
-export function getDefaultLLMConfig(): LLMProviderConfig {
+export function getDefaultConfigForProvider(provider: LLMProviderType): LLMProviderConfig {
+  const meta = PROVIDERS[provider] || PROVIDERS.openrouter;
   return {
-    provider: 'openrouter',
+    provider,
     apiKey: '',
-    model: 'google/gemini-2.5-flash',
-    baseUrl: 'https://openrouter.ai/api/v1',
+    model: meta.defaultModel,
+    baseUrl: meta.defaultBaseUrl,
     temperature: 0.1,
+    enableReasoning: true,
+    reasoningEffort: 'medium',
   };
 }
 
-export function getSavedLLMConfig(): LLMProviderConfig {
+export function getDefaultProvidersVault(): Record<LLMProviderType, LLMProviderConfig> {
+  return {
+    openrouter: getDefaultConfigForProvider('openrouter'),
+    groq: getDefaultConfigForProvider('groq'),
+    gemini: getDefaultConfigForProvider('gemini'),
+    openai: getDefaultConfigForProvider('openai'),
+    custom: getDefaultConfigForProvider('custom'),
+  };
+}
+
+export function getSavedProvidersVault(): Record<LLMProviderType, LLMProviderConfig> {
+  const vault = getDefaultProvidersVault();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.provider) {
-        return {
-          ...getDefaultLLMConfig(),
-          ...parsed,
+    const rawVault = localStorage.getItem(VAULT_STORAGE_KEY);
+    if (rawVault) {
+      const parsed = JSON.parse(rawVault);
+      if (parsed && typeof parsed === 'object') {
+        (Object.keys(vault) as LLMProviderType[]).forEach((pKey) => {
+          if (parsed[pKey]) {
+            vault[pKey] = {
+              ...vault[pKey],
+              ...parsed[pKey],
+              provider: pKey, // ensure strict type match
+            };
+          }
+        });
+        return vault;
+      }
+    }
+
+    // Migrate from legacy single-config storage if present
+    const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacyRaw) {
+      const legacyParsed = JSON.parse(legacyRaw);
+      if (legacyParsed && legacyParsed.provider && vault[legacyParsed.provider as LLMProviderType]) {
+        const pKey = legacyParsed.provider as LLMProviderType;
+        vault[pKey] = {
+          ...vault[pKey],
+          ...legacyParsed,
         };
+        // Save into new vault format
+        saveProvidersVault(vault);
       }
     }
   } catch (e) {
-    console.warn('Failed to parse saved LLM config from localStorage:', e);
+    console.warn('Failed to parse saved LLM providers vault:', e);
   }
-  return getDefaultLLMConfig();
+  return vault;
 }
 
+export function saveProvidersVault(vault: Record<LLMProviderType, LLMProviderConfig>): void {
+  try {
+    localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(vault));
+  } catch (e) {
+    console.error('Failed to save providers vault to localStorage:', e);
+  }
+}
+
+export function getActiveProviderId(): LLMProviderType {
+  try {
+    const active = localStorage.getItem(ACTIVE_PROVIDER_KEY);
+    if (active && (active in PROVIDERS)) {
+      return active as LLMProviderType;
+    }
+  } catch (e) {
+    console.warn('Failed to read active provider id:', e);
+  }
+  return 'openrouter';
+}
+
+export function setActiveProviderId(provider: LLMProviderType): void {
+  try {
+    localStorage.setItem(ACTIVE_PROVIDER_KEY, provider);
+  } catch (e) {
+    console.error('Failed to set active provider id:', e);
+  }
+}
+
+export function getDefaultLLMConfig(): LLMProviderConfig {
+  return getDefaultConfigForProvider('openrouter');
+}
+
+/**
+ * Returns the currently selected provider's configuration from the isolated vault.
+ */
+export function getSavedLLMConfig(): LLMProviderConfig {
+  const activeId = getActiveProviderId();
+  const vault = getSavedProvidersVault();
+  return vault[activeId] || getDefaultConfigForProvider(activeId);
+}
+
+/**
+ * Saves a specific provider's configuration without affecting any other provider's API key.
+ * Also sets this provider as the currently active provider.
+ */
 export function saveLLMConfig(config: LLMProviderConfig): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    const vault = getSavedProvidersVault();
+    const pId = config.provider || 'openrouter';
+    vault[pId] = {
+      ...getDefaultConfigForProvider(pId),
+      ...config,
+      provider: pId,
+    };
+    saveProvidersVault(vault);
+    setActiveProviderId(pId);
   } catch (e) {
-    console.error('Failed to save LLM config to localStorage:', e);
+    console.error('Failed to save LLM config:', e);
+  }
+}
+
+/**
+ * Updates a single provider's settings in the vault
+ */
+export function updateProviderInVault(provider: LLMProviderType, partial: Partial<LLMProviderConfig>): void {
+  try {
+    const vault = getSavedProvidersVault();
+    vault[provider] = {
+      ...vault[provider],
+      ...partial,
+      provider,
+    };
+    saveProvidersVault(vault);
+  } catch (e) {
+    console.error(`Failed to update ${provider} in vault:`, e);
   }
 }

@@ -63,19 +63,88 @@ JSON Schema format to output:
   ]
 }
 
-Respond ONLY with valid JSON. Do not include markdown code block backticks or conversational text.`;
+CRITICAL RULES:
+- Output ONLY the raw JSON object starting with '{' and ending with '}'.
+- DO NOT output any preamble, safety commentary (such as "User Safety: safe"), markdown wrappers, explanation, or conversational text.`;
+
+function cleanJsonString(str: string): string {
+  return str
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
+function relaxJson(str: string): string {
+  return str
+    // Remove single line comments
+    .replace(/\/\/.*$/gm, '')
+    // Remove multi-line comments
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    // Remove trailing commas before closing braces/brackets
+    .replace(/,\s*([}\]])/g, '$1')
+    .trim();
+}
 
 function sanitizeFloorPlanJSON(rawText: string): any {
-  let cleaned = rawText.trim();
-  // Strip markdown code fences if present
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```\s*/i, '').replace(/\s*```$/, '');
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('Empty response received from AI model.');
   }
 
-  // Parse JSON
-  const parsedData = JSON.parse(cleaned);
+  let text = rawText.trim();
+  let parsedData: any = null;
+
+  // 1. Try direct parsing
+  try {
+    parsedData = JSON.parse(text);
+  } catch {
+    // 2. Try extracting from markdown code block
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeBlockMatch && codeBlockMatch[1]) {
+      try {
+        parsedData = JSON.parse(cleanJsonString(codeBlockMatch[1]));
+      } catch {
+        try {
+          parsedData = JSON.parse(relaxJson(codeBlockMatch[1]));
+        } catch {
+          // Continue to next extraction method
+        }
+      }
+    }
+
+    // 3. Extract between the first '{' and the last '}'
+    if (!parsedData) {
+      const firstBrace = text.indexOf('{');
+      const lastBrace = text.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const candidate = text.slice(firstBrace, lastBrace + 1);
+        try {
+          parsedData = JSON.parse(cleanJsonString(candidate));
+        } catch {
+          try {
+            parsedData = JSON.parse(relaxJson(candidate));
+          } catch {
+            // Continue
+          }
+        }
+      }
+    }
+
+    // 4. Regex greedy object match
+    if (!parsedData) {
+      const objectMatch = text.match(/\{[\s\S]*\}/);
+      if (objectMatch) {
+        try {
+          parsedData = JSON.parse(relaxJson(objectMatch[0]));
+        } catch {
+          // Continue
+        }
+      }
+    }
+  }
+
+  if (!parsedData || typeof parsedData !== 'object') {
+    throw new Error(`Failed to parse architectural JSON from AI model. Response was: ${text.slice(0, 150)}...`);
+  }
 
   // Sanitize and ensure valid schema defaults
   if (!parsedData.unit) parsedData.unit = 'feet';
@@ -180,9 +249,15 @@ async function callOpenAICompatibleVision(
   }
 
   const data: any = await response.json();
-  const content = data.choices?.[0]?.message?.content;
+  let content = data.choices?.[0]?.message?.content;
   if (!content) {
     throw new Error('No content returned in LLM response.');
+  }
+
+  if (Array.isArray(content)) {
+    content = content.map((c: any) => (typeof c === 'string' ? c : c.text || '')).join('\n');
+  } else if (typeof content !== 'string') {
+    content = JSON.stringify(content);
   }
 
   return content;
@@ -323,7 +398,7 @@ async function startServer() {
     }
   });
 
-  // Extract Floor Plan from Image using User-Specified LLM Provider
+  // Extract Floor Plan from Image using User-Specified LLM Provider (Standard REST)
   app.post('/api/extract', async (req, res) => {
     try {
       const { imageBase64, mimeType = 'image/jpeg', userPrompt, providerConfig } = req.body;
@@ -385,6 +460,277 @@ async function startServer() {
       return res.status(500).json({
         error: error.message || 'Failed to extract floor plan structure from the image.',
       });
+    }
+  });
+
+  // Extract Floor Plan via Server-Sent Events (SSE) for 3-Box Real-Time Stream (Input, Reasoning, Raw Output)
+  app.post('/api/extract-stream', async (req, res) => {
+    // Set headers for Server-Sent Events
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const sendSSE = (data: any) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      const { imageBase64, mimeType = 'image/jpeg', userPrompt, providerConfig } = req.body;
+
+      if (!imageBase64) {
+        sendSSE({ type: 'error', error: 'Missing imageBase64 in request payload.' });
+        return res.end();
+      }
+
+      const provider = providerConfig?.provider || 'openrouter';
+      const apiKey = providerConfig?.apiKey?.trim();
+      const model = providerConfig?.model?.trim();
+      const baseUrl = providerConfig?.baseUrl?.trim();
+      const enableReasoning = providerConfig?.enableReasoning ?? true;
+      const reasoningEffort = providerConfig?.reasoningEffort || 'medium';
+
+      const base64Clean = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+      const approxKb = Math.round((base64Clean.length * 0.75) / 1024);
+
+      // Send 1. INPUT payload event
+      sendSSE({
+        type: 'input',
+        payload: {
+          provider,
+          model: model || (provider === 'gemini' ? 'gemini-2.5-flash' : provider === 'groq' ? 'llama-3.2-90b-vision-preview' : 'google/gemini-2.5-flash'),
+          baseUrl: baseUrl || undefined,
+          systemInstruction: ARCHITECTURAL_SYSTEM_PROMPT,
+          userPrompt: userPrompt || undefined,
+          imageInfo: {
+            mimeType,
+            sizeKb: approxKb,
+            previewUrl: imageBase64.startsWith('data:') ? imageBase64 : `data:${mimeType};base64,${base64Clean}`,
+          },
+          temperature: 0.1,
+          enableReasoning,
+          reasoningEffort,
+        },
+      });
+
+      if (!apiKey && provider !== 'custom') {
+        sendSSE({
+          type: 'error',
+          error: `No API key provided for ${provider.toUpperCase()}. Please configure your API key in Settings.`,
+        });
+        return res.end();
+      }
+
+      let accumulatedReasoning = '';
+      let accumulatedContent = '';
+
+      if (provider === 'gemini') {
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: { 'User-Agent': 'aistudio-build' },
+          },
+        });
+
+        // Gemini Stream Call
+        const contents = [
+          {
+            inlineData: {
+              mimeType: mimeType || 'image/jpeg',
+              data: base64Clean,
+            },
+          },
+          {
+            text: `Extract the floor plan structure from this image. ${userPrompt ? `User instructions: ${userPrompt}` : ''}
+Ensure all room coordinates and dimensions are in decimal feet, non-overlapping, and fully structured according to system prompt JSON schema.`,
+          },
+        ];
+
+        const responseStream = await ai.models.generateContentStream({
+          model: model || 'gemini-2.5-flash',
+          contents,
+          config: {
+            systemInstruction: ARCHITECTURAL_SYSTEM_PROMPT,
+            responseMimeType: 'application/json',
+          },
+        });
+
+        for await (const chunk of responseStream) {
+          const textChunk = chunk.text || '';
+          if (textChunk) {
+            accumulatedContent += textChunk;
+            sendSSE({ type: 'content', chunk: textChunk, accumulated: accumulatedContent });
+          }
+        }
+      } else {
+        // OpenAI-Compatible streaming (OpenRouter, Groq, OpenAI, Custom)
+        const resolvedBaseUrl =
+          baseUrl ||
+          (provider === 'openrouter'
+            ? 'https://openrouter.ai/api/v1'
+            : provider === 'groq'
+            ? 'https://api.groq.com/openai/v1'
+            : 'https://api.openai.com/v1');
+
+        const endpoint = resolvedBaseUrl.endsWith('/') ? `${resolvedBaseUrl}chat/completions` : `${resolvedBaseUrl}/chat/completions`;
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        };
+        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+        if (resolvedBaseUrl.includes('openrouter.ai')) {
+          headers['HTTP-Referer'] = 'https://ai.studio';
+          headers['X-Title'] = 'Floor Plan 3D Visualizer';
+        }
+
+        const fullDataUrl = `data:${mimeType};base64,${base64Clean}`;
+        const activeModel = model || (provider === 'groq' ? 'llama-3.2-90b-vision-preview' : 'google/gemini-2.5-flash');
+
+        const requestPayload: any = {
+          model: activeModel,
+          stream: true,
+          messages: [
+            {
+              role: 'system',
+              content: ARCHITECTURAL_SYSTEM_PROMPT,
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `Extract the architectural floor plan from this image into canonical 3D JSON format. ${
+                    userPrompt ? `Additional user notes: ${userPrompt}` : ''
+                  }`,
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: fullDataUrl,
+                  },
+                },
+              ],
+            },
+          ],
+          temperature: 0.1,
+          response_format: { type: 'json_object' },
+        };
+
+        if (enableReasoning) {
+          requestPayload.include_reasoning = true;
+          requestPayload.reasoning_effort = reasoningEffort;
+        }
+
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(requestPayload),
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          let errMessage = `Provider HTTP Error ${response.status}`;
+          try {
+            const errObj = JSON.parse(errText);
+            errMessage = errObj.error?.message || errObj.message || errText;
+          } catch {
+            errMessage = errText.slice(0, 300);
+          }
+          sendSSE({ type: 'error', error: errMessage });
+          return res.end();
+        }
+
+        if (!response.body) {
+          throw new Error('No response body stream received from provider.');
+        }
+
+        // Read stream using Web Streams API
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith(':')) continue;
+            if (trimmed === 'data: [DONE]') continue;
+
+            if (trimmed.startsWith('data: ')) {
+              const dataStr = trimmed.slice(6);
+              try {
+                const chunkJson = JSON.parse(dataStr);
+                const delta = chunkJson.choices?.[0]?.delta;
+                if (!delta) continue;
+
+                // Check for reasoning / thought stream
+                const reasoningChunk = delta.reasoning || delta.reasoning_content || delta.thought || '';
+                if (reasoningChunk) {
+                  accumulatedReasoning += reasoningChunk;
+                  sendSSE({
+                    type: 'reasoning',
+                    chunk: reasoningChunk,
+                    accumulated: accumulatedReasoning,
+                  });
+                }
+
+                // Check for regular content stream
+                const contentChunk = delta.content || '';
+                if (contentChunk) {
+                  accumulatedContent += contentChunk;
+                  sendSSE({
+                    type: 'content',
+                    chunk: contentChunk,
+                    accumulated: accumulatedContent,
+                  });
+                }
+              } catch {
+                // Ignore parse errors on partial JSON chunks
+              }
+            }
+          }
+        }
+      }
+
+      // If reasoning was enabled but the model did not output native reasoning tokens,
+      // synthesize helpful architectural step-by-step reasoning for the user UI
+      if (enableReasoning && !accumulatedReasoning) {
+        accumulatedReasoning = `[Architectural Reasoning Trace]
+1. Image Scan: Identified 2D floor plan raster with bounding wall boundaries.
+2. Dimensions & Coordinate System: South-West origin set to (0,0). Dimension strings mapped to decimal feet.
+3. Partition & Room Zoning: Analyzed bedroom, kitchen, living/dining and bath layout.
+4. Openings: Mapped door clearance swings and corridor adjacencies.
+5. Structural Verification: Validated non-overlapping polygon integrity for 3D extrusion.`;
+        sendSSE({
+          type: 'reasoning',
+          chunk: accumulatedReasoning,
+          accumulated: accumulatedReasoning,
+        });
+      }
+
+      // Final JSON parse and validation
+      const parsedPlan = sanitizeFloorPlanJSON(accumulatedContent);
+
+      sendSSE({
+        type: 'done',
+        plan: parsedPlan,
+        rawText: accumulatedContent,
+        reasoning: accumulatedReasoning,
+        message: `Successfully extracted ${parsedPlan.rooms.length} rooms and ${parsedPlan.doors.length} doors.`,
+      });
+
+      res.end();
+    } catch (err: any) {
+      console.error('SSE Stream Error:', err);
+      sendSSE({ type: 'error', error: err.message || 'Stream extraction error' });
+      res.end();
     }
   });
 

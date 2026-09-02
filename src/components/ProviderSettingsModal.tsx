@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Sparkles,
   Key,
@@ -14,11 +14,19 @@ import {
   RotateCcw,
   Check,
   Server,
-  Link,
   RefreshCw,
+  BrainCircuit,
+  Sliders,
 } from 'lucide-react';
 import { LLMProviderConfig, LLMProviderType } from '../types';
-import { PROVIDERS, getDefaultLLMConfig, saveLLMConfig } from '../data/llmProviders';
+import {
+  PROVIDERS,
+  getDefaultConfigForProvider,
+  getSavedProvidersVault,
+  saveProvidersVault,
+  setActiveProviderId,
+  saveLLMConfig,
+} from '../data/llmProviders';
 import { testProviderConnection, resolveEndpointUrl } from '../utils/aiClient';
 
 interface ProviderSettingsModalProps {
@@ -34,35 +42,66 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
   config: initialConfig,
   onSave,
 }) => {
-  const [formConfig, setFormConfig] = useState<LLMProviderConfig>({ ...initialConfig });
+  // Full isolated vault for all providers
+  const [vault, setVault] = useState<Record<LLMProviderType, LLMProviderConfig>>(() => {
+    const saved = getSavedProvidersVault();
+    // Ensure active provider from props is synchronized
+    if (initialConfig?.provider) {
+      saved[initialConfig.provider] = {
+        ...saved[initialConfig.provider],
+        ...initialConfig,
+      };
+    }
+    return saved;
+  });
+
+  const [activeTab, setActiveTab] = useState<LLMProviderType>(initialConfig?.provider || 'openrouter');
   const [showKey, setShowKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  
-  // Custom Model State
-  const [isCustomModel, setIsCustomModel] = useState(
-    !PROVIDERS[initialConfig.provider]?.popularModels.some((m) => m.id === initialConfig.model)
-  );
-  
-  // Custom Endpoint State
-  const currentProvider = PROVIDERS[formConfig.provider] || PROVIDERS.openrouter;
-  const isDefaultEndpoint = (formConfig.baseUrl || currentProvider.defaultBaseUrl) === currentProvider.defaultBaseUrl;
-  const [isCustomEndpoint, setIsCustomEndpoint] = useState(
-    formConfig.provider === 'custom' || !isDefaultEndpoint
-  );
+
+  // Sync state when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      const freshVault = getSavedProvidersVault();
+      if (initialConfig?.provider) {
+        freshVault[initialConfig.provider] = {
+          ...freshVault[initialConfig.provider],
+          ...initialConfig,
+        };
+      }
+      setVault(freshVault);
+      setActiveTab(initialConfig?.provider || 'openrouter');
+      setTestResult(null);
+    }
+  }, [isOpen, initialConfig]);
 
   if (!isOpen) return null;
 
-  const handleProviderSelect = (pId: LLMProviderType) => {
-    const pMeta = PROVIDERS[pId];
-    setFormConfig((prev) => ({
+  const currentConfig: LLMProviderConfig =
+    vault[activeTab] || getDefaultConfigForProvider(activeTab);
+  const currentProviderMeta = PROVIDERS[activeTab] || PROVIDERS.openrouter;
+
+  const updateCurrentConfig = (patch: Partial<LLMProviderConfig>) => {
+    setVault((prev) => ({
       ...prev,
-      provider: pId,
-      model: pMeta.defaultModel,
-      baseUrl: pMeta.defaultBaseUrl,
+      [activeTab]: {
+        ...prev[activeTab],
+        ...patch,
+      },
     }));
-    setIsCustomModel(false);
-    setIsCustomEndpoint(pId === 'custom');
+    setTestResult(null);
+  };
+
+  const isCustomModel =
+    !currentProviderMeta.popularModels.some((m) => m.id === currentConfig.model);
+
+  const isCustomEndpoint =
+    activeTab === 'custom' ||
+    (currentConfig.baseUrl && currentConfig.baseUrl !== currentProviderMeta.defaultBaseUrl);
+
+  const handleProviderTabSelect = (pId: LLMProviderType) => {
+    setActiveTab(pId);
     setTestResult(null);
   };
 
@@ -70,13 +109,14 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
     setIsTesting(true);
     setTestResult(null);
 
-    const activeConfig: LLMProviderConfig = {
-      ...formConfig,
-      baseUrl: formConfig.baseUrl || currentProvider.defaultBaseUrl,
+    const activeConfigToTest: LLMProviderConfig = {
+      ...currentConfig,
+      provider: activeTab,
+      baseUrl: currentConfig.baseUrl || currentProviderMeta.defaultBaseUrl,
     };
 
     try {
-      const result = await testProviderConnection(activeConfig);
+      const result = await testProviderConnection(activeConfigToTest);
       setTestResult(result);
     } catch (err: any) {
       setTestResult({
@@ -89,24 +129,27 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
   };
 
   const handleSaveAndClose = () => {
-    const finalConfig: LLMProviderConfig = {
-      ...formConfig,
-      baseUrl: (formConfig.baseUrl && formConfig.baseUrl.trim()) || currentProvider.defaultBaseUrl,
+    // 1. Persist the entire vault containing all saved provider keys
+    saveProvidersVault(vault);
+    // 2. Set the active provider
+    setActiveProviderId(activeTab);
+    // 3. Save active provider config
+    const finalActiveConfig: LLMProviderConfig = {
+      ...vault[activeTab],
+      provider: activeTab,
+      baseUrl: (vault[activeTab].baseUrl && vault[activeTab].baseUrl.trim()) || currentProviderMeta.defaultBaseUrl,
     };
-    saveLLMConfig(finalConfig);
-    onSave(finalConfig);
+    saveLLMConfig(finalActiveConfig);
+    onSave(finalActiveConfig);
     onClose();
   };
 
-  const handleResetDefaults = () => {
-    const def = getDefaultLLMConfig();
-    setFormConfig(def);
-    setIsCustomModel(false);
-    setIsCustomEndpoint(false);
-    setTestResult(null);
+  const handleResetCurrentProvider = () => {
+    const def = getDefaultConfigForProvider(activeTab);
+    updateCurrentConfig(def);
   };
 
-  const resolvedFullEndpoint = resolveEndpointUrl(formConfig.baseUrl, formConfig.provider);
+  const resolvedFullEndpoint = resolveEndpointUrl(currentConfig.baseUrl, activeTab);
 
   return (
     <div
@@ -128,7 +171,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 AI Provider & Vision Settings
               </h2>
               <p className="text-xs text-neutral-400">
-                Configure API keys, custom models, and custom endpoints for OpenRouter, Groq, Gemini, OpenAI, or local LLMs
+                Each provider key is stored independently in local storage. Switch between OpenRouter, Gemini, Groq, and OpenAI without losing keys.
               </p>
             </div>
           </div>
@@ -151,14 +194,15 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {(Object.keys(PROVIDERS) as LLMProviderType[]).map((pKey) => {
                 const p = PROVIDERS[pKey];
-                const isSelected = formConfig.provider === pKey;
+                const isSelected = activeTab === pKey;
+                const hasKey = !!vault[pKey]?.apiKey?.trim();
                 return (
                   <button
                     key={pKey}
                     id={`provider-select-${pKey}`}
                     type="button"
-                    onClick={() => handleProviderSelect(pKey)}
-                    className={`flex flex-col items-start p-3 rounded-xl border text-left transition-all ${
+                    onClick={() => handleProviderTabSelect(pKey)}
+                    className={`flex flex-col items-start p-3 rounded-xl border text-left transition-all relative ${
                       isSelected
                         ? 'bg-amber-500/10 border-amber-500/50 text-white shadow-sm ring-1 ring-amber-500/40'
                         : 'bg-neutral-800/60 border-neutral-800 hover:border-neutral-700 text-neutral-400 hover:text-neutral-200'
@@ -166,30 +210,41 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                   >
                     <div className="flex items-center justify-between w-full mb-1">
                       <span className="font-semibold text-sm text-neutral-100">{p.name}</span>
-                      {isSelected && <Check className="w-4 h-4 text-amber-400" />}
+                      {isSelected ? (
+                        <Check className="w-4 h-4 text-amber-400" />
+                      ) : hasKey ? (
+                        <span className="w-2 h-2 rounded-full bg-emerald-400" title="API Key saved" />
+                      ) : null}
                     </div>
-                    <span className="text-[11px] text-neutral-400 line-clamp-1">{p.tagline}</span>
+                    <div className="flex items-center justify-between w-full">
+                      <span className="text-[11px] text-neutral-400 line-clamp-1">{p.tagline}</span>
+                    </div>
+                    {hasKey && (
+                      <span className="mt-1 text-[9px] font-mono uppercase tracking-wider bg-emerald-500/10 text-emerald-400 px-1.5 py-0.2 rounded border border-emerald-500/20">
+                        Key Saved
+                      </span>
+                    )}
                   </button>
                 );
               })}
             </div>
           </div>
 
-          {/* API Key Input Section */}
+          {/* API Key Input Section for Current Selected Provider */}
           <div className="space-y-2 bg-neutral-800/40 border border-neutral-800 rounded-xl p-4">
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
                 <Key className="w-3.5 h-3.5 text-amber-400" />
-                {currentProvider.name} API Key
+                {currentProviderMeta.name} API Key
               </label>
-              {currentProvider.keyUrl && (
+              {currentProviderMeta.keyUrl && (
                 <a
-                  href={currentProvider.keyUrl}
+                  href={currentProviderMeta.keyUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1 hover:underline"
                 >
-                  Get {currentProvider.name} key <ExternalLink className="w-3 h-3" />
+                  Get {currentProviderMeta.name} key <ExternalLink className="w-3 h-3" />
                 </a>
               )}
             </div>
@@ -198,12 +253,9 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
               <input
                 id="llm-api-key-input"
                 type={showKey ? 'text' : 'password'}
-                value={formConfig.apiKey || ''}
-                onChange={(e) => {
-                  setFormConfig((prev) => ({ ...prev, apiKey: e.target.value }));
-                  setTestResult(null);
-                }}
-                placeholder={currentProvider.keyPlaceholder}
+                value={currentConfig.apiKey || ''}
+                onChange={(e) => updateCurrentConfig({ apiKey: e.target.value })}
+                placeholder={currentProviderMeta.keyPlaceholder}
                 className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3.5 py-2.5 pr-10 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"
               />
               <button
@@ -216,8 +268,59 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
             </div>
 
             <p className="text-[11px] text-neutral-400">
-              Your API key is securely retained in your browser session and never stored permanently on any backend.
+              Saved specifically for <strong className="text-neutral-300">{currentProviderMeta.name}</strong> in your local browser vault.
             </p>
+          </div>
+
+          {/* Reasoning & Chain of Thought Stream Settings */}
+          <div className="space-y-3 bg-neutral-800/40 border border-neutral-800 rounded-xl p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <BrainCircuit className="w-4 h-4 text-amber-400" />
+                <div>
+                  <div className="text-xs font-semibold text-neutral-200">
+                    Chain of Thought & Reasoning Stream
+                  </div>
+                  <div className="text-[11px] text-neutral-400">
+                    Live stream the AI's internal spatial reasoning steps before the final architectural layout.
+                  </div>
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={currentConfig.enableReasoning ?? true}
+                  onChange={(e) => updateCurrentConfig({ enableReasoning: e.target.checked })}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-neutral-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-neutral-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+              </label>
+            </div>
+
+            {(currentConfig.enableReasoning ?? true) && (
+              <div className="pt-2 border-t border-neutral-800/80 flex items-center justify-between text-xs">
+                <span className="text-neutral-400 flex items-center gap-1.5">
+                  <Sliders className="w-3.5 h-3.5 text-neutral-500" />
+                  Reasoning Effort / Budget
+                </span>
+                <div className="inline-flex rounded-lg border border-neutral-700 p-0.5 bg-neutral-900">
+                  {(['low', 'medium', 'high'] as const).map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      onClick={() => updateCurrentConfig({ reasoningEffort: lvl })}
+                      className={`px-2.5 py-1 rounded text-[11px] font-medium capitalize transition-all ${
+                        (currentConfig.reasoningEffort || 'medium') === lvl
+                          ? 'bg-amber-500 text-neutral-950 font-semibold'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      {lvl}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Vision Model Selection */}
@@ -230,7 +333,13 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
               <button
                 id="toggle-custom-model-btn"
                 type="button"
-                onClick={() => setIsCustomModel(!isCustomModel)}
+                onClick={() => {
+                  if (isCustomModel) {
+                    updateCurrentConfig({ model: currentProviderMeta.defaultModel });
+                  } else {
+                    updateCurrentConfig({ model: '' });
+                  }
+                }}
                 className="text-xs text-amber-400 hover:text-amber-300 underline font-medium"
               >
                 {isCustomModel ? 'Choose from presets' : 'Enter custom model name'}
@@ -239,16 +348,13 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
 
             {!isCustomModel ? (
               <div className="space-y-1.5">
-                {currentProvider.popularModels.map((preset) => {
-                  const isSelected = formConfig.model === preset.id;
+                {currentProviderMeta.popularModels.map((preset) => {
+                  const isSelected = currentConfig.model === preset.id;
                   return (
                     <button
                       key={preset.id}
                       type="button"
-                      onClick={() => {
-                        setFormConfig((prev) => ({ ...prev, model: preset.id }));
-                        setTestResult(null);
-                      }}
+                      onClick={() => updateCurrentConfig({ model: preset.id })}
                       className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition-all ${
                         isSelected
                           ? 'bg-amber-500/10 border-amber-500/50 text-white'
@@ -261,6 +367,11 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                           {preset.supportsVision && (
                             <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded">
                               Vision
+                            </span>
+                          )}
+                          {preset.supportsReasoning && (
+                            <span className="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 px-1.5 py-0.5 rounded">
+                              Thinking CoT
                             </span>
                           )}
                         </div>
@@ -286,12 +397,9 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 <input
                   id="custom-model-input"
                   type="text"
-                  value={formConfig.model || ''}
-                  onChange={(e) => {
-                    setFormConfig((prev) => ({ ...prev, model: e.target.value }));
-                    setTestResult(null);
-                  }}
-                  placeholder="e.g. meta-llama/llama-3.2-90b-vision-instruct, mistralai/pixtral-12b, or gpt-4o"
+                  value={currentConfig.model || ''}
+                  onChange={(e) => updateCurrentConfig({ model: e.target.value })}
+                  placeholder="e.g. anthropic/claude-3.7-sonnet:thinking, meta-llama/llama-3.2-90b-vision-instruct, or gpt-4o"
                   className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"
                 />
                 <p className="text-[11px] text-neutral-400">
@@ -309,13 +417,10 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 API Endpoint & Base URL
               </label>
               <div className="flex items-center gap-2">
-                {formConfig.baseUrl && formConfig.baseUrl !== currentProvider.defaultBaseUrl && (
+                {currentConfig.baseUrl && currentConfig.baseUrl !== currentProviderMeta.defaultBaseUrl && (
                   <button
                     type="button"
-                    onClick={() => {
-                      setFormConfig((prev) => ({ ...prev, baseUrl: currentProvider.defaultBaseUrl }));
-                      setTestResult(null);
-                    }}
+                    onClick={() => updateCurrentConfig({ baseUrl: currentProviderMeta.defaultBaseUrl })}
                     className="text-[11px] text-neutral-400 hover:text-amber-400 flex items-center gap-1"
                     title="Reset to default endpoint"
                   >
@@ -325,7 +430,13 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 <button
                   id="toggle-custom-endpoint-btn"
                   type="button"
-                  onClick={() => setIsCustomEndpoint(!isCustomEndpoint)}
+                  onClick={() => {
+                    if (isCustomEndpoint) {
+                      updateCurrentConfig({ baseUrl: currentProviderMeta.defaultBaseUrl });
+                    } else {
+                      updateCurrentConfig({ baseUrl: currentProviderMeta.defaultBaseUrl });
+                    }
+                  }}
                   className="text-xs text-amber-400 hover:text-amber-300 underline font-medium"
                 >
                   {isCustomEndpoint ? 'Choose preset endpoint' : 'Edit custom endpoint'}
@@ -335,17 +446,14 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
 
             {!isCustomEndpoint ? (
               <div className="space-y-1.5">
-                {currentProvider.endpointPresets?.map((ep) => {
-                  const currentBase = formConfig.baseUrl || currentProvider.defaultBaseUrl;
+                {currentProviderMeta.endpointPresets?.map((ep) => {
+                  const currentBase = currentConfig.baseUrl || currentProviderMeta.defaultBaseUrl;
                   const isSelected = currentBase === ep.url;
                   return (
                     <button
                       key={ep.url}
                       type="button"
-                      onClick={() => {
-                        setFormConfig((prev) => ({ ...prev, baseUrl: ep.url }));
-                        setTestResult(null);
-                      }}
+                      onClick={() => updateCurrentConfig({ baseUrl: ep.url })}
                       className={`w-full flex items-center justify-between p-2.5 rounded-lg border text-left transition-all ${
                         isSelected
                           ? 'bg-amber-500/10 border-amber-500/50 text-white'
@@ -372,12 +480,9 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 <input
                   id="llm-base-url-input"
                   type="text"
-                  value={formConfig.baseUrl || ''}
-                  onChange={(e) => {
-                    setFormConfig((prev) => ({ ...prev, baseUrl: e.target.value }));
-                    setTestResult(null);
-                  }}
-                  placeholder={currentProvider.defaultBaseUrl || 'https://openrouter.ai/api/v1'}
+                  value={currentConfig.baseUrl || ''}
+                  onChange={(e) => updateCurrentConfig({ baseUrl: e.target.value })}
+                  placeholder={currentProviderMeta.defaultBaseUrl || 'https://openrouter.ai/api/v1'}
                   className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"
                 />
                 <p className="text-[11px] text-neutral-400">
@@ -425,19 +530,19 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
               id="test-connection-btn"
               type="button"
               onClick={handleTestConnection}
-              disabled={isTesting || (!formConfig.apiKey && formConfig.provider !== 'custom')}
+              disabled={isTesting || (!currentConfig.apiKey && activeTab !== 'custom')}
               className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-xs font-medium text-neutral-200 disabled:opacity-50 transition-colors"
             >
               <Zap className={`w-3.5 h-3.5 text-amber-400 ${isTesting ? 'animate-spin' : ''}`} />
-              {isTesting ? 'Testing connection...' : 'Test Connection'}
+              {isTesting ? 'Testing connection...' : `Test ${currentProviderMeta.name}`}
             </button>
 
             <button
               id="reset-llm-btn"
               type="button"
-              onClick={handleResetDefaults}
+              onClick={handleResetCurrentProvider}
               className="p-2 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 text-xs flex items-center gap-1"
-              title="Reset all settings to defaults"
+              title="Reset current provider to defaults"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
@@ -460,7 +565,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
               className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-neutral-950 text-xs font-semibold shadow-lg shadow-amber-500/20 transition-all active:scale-95"
             >
               <Check className="w-4 h-4" />
-              Save & Apply Provider
+              Save & Use {currentProviderMeta.name}
             </button>
           </div>
         </div>
@@ -468,3 +573,4 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
     </div>
   );
 };
+

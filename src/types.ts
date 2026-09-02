@@ -151,6 +151,33 @@ export interface LLMProviderConfig {
   model: string;
   baseUrl?: string;
   temperature?: number;
+  enableReasoning?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+}
+
+export type ProvidersVault = Record<LLMProviderType, LLMProviderConfig>;
+
+export interface AIStreamInputPayload {
+  provider: LLMProviderType;
+  model: string;
+  baseUrl?: string;
+  systemInstruction: string;
+  userPrompt?: string;
+  imageInfo: {
+    mimeType: string;
+    sizeKb: number;
+    previewUrl?: string;
+  };
+  temperature?: number;
+  enableReasoning?: boolean;
+}
+
+export interface AIStreamEventCallbacks {
+  onInput?: (input: AIStreamInputPayload) => void;
+  onReasoningChunk?: (chunk: string, accumulated: string) => void;
+  onContentChunk?: (chunk: string, accumulated: string) => void;
+  onDone?: (plan: FloorPlanData, rawText: string) => void;
+  onError?: (error: string) => void;
 }
 
 export interface ModelPreset {
@@ -159,4 +186,5 @@ export interface ModelPreset {
   provider: LLMProviderType;
   description: string;
   supportsVision: boolean;
+  supportsReasoning?: boolean;
 }

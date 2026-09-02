@@ -86,7 +86,7 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100 font-sans select-none">
       {/* Top Application Header */}
-      <header className="h-14 border-b border-neutral-800 bg-neutral-900/90 backdrop-blur-md px-2.5 sm:px-4 flex items-center justify-between z-20 shrink-0 gap-2 overflow-hidden">
+      <header className="h-14 border-b border-neutral-800 bg-neutral-900/90 backdrop-blur-md px-2 sm:px-4 flex items-center justify-between z-20 shrink-0 gap-1.5 sm:gap-2">
         {/* Left: Brand & Active Plan Title */}
         <div className="flex items-center space-x-1.5 sm:space-x-2.5 min-w-0 shrink">
           <div
@@ -103,7 +103,7 @@ export default function App() {
 
           {/* Active Plan Name Badge */}
           {currentScreen === 'visualizer' && (
-            <div className="hidden xs:flex items-center space-x-1.5 bg-neutral-800/80 px-2 sm:px-2.5 py-1 rounded-xl border border-neutral-700/60 max-w-[100px] sm:max-w-[140px] md:max-w-[160px] lg:max-w-xs truncate shrink">
+            <div className="hidden sm:flex items-center space-x-1.5 bg-neutral-800/80 px-2 sm:px-2.5 py-1 rounded-xl border border-neutral-700/60 max-w-[90px] md:max-w-[130px] lg:max-w-xs truncate shrink">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
               <span className="text-xs font-medium text-neutral-200 truncate">{planTitle}</span>
             </div>
@@ -112,7 +112,7 @@ export default function App() {
 
         {/* Center: Mode Switching Controls (visualizer screen) */}
         {currentScreen === 'visualizer' && (
-          <div className="hidden md:flex items-center space-x-0.5 lg:space-x-1 bg-neutral-950 p-1 rounded-xl border border-neutral-800 shadow-inner shrink-0">
+          <div className="hidden md:flex items-center space-x-0.5 lg:space-x-1 bg-neutral-950 p-0.5 sm:p-1 rounded-xl border border-neutral-800 shadow-inner shrink">
             <button
               id="view-mode-3d-orbit"
               onClick={() => {
@@ -127,8 +127,8 @@ export default function App() {
               }`}
             >
               <Compass className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden xl:inline">3D Dollhouse</span>
-              <span className="xl:hidden">3D View</span>
+              <span className="hidden lg:inline">3D Dollhouse</span>
+              <span className="lg:hidden">3D</span>
             </button>
 
             <button
@@ -145,8 +145,8 @@ export default function App() {
               }`}
             >
               <Move className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden xl:inline">Walkthrough</span>
-              <span className="xl:hidden">Walk</span>
+              <span className="hidden lg:inline">Walkthrough</span>
+              <span className="lg:hidden">Walk</span>
             </button>
 
             <button
@@ -163,8 +163,8 @@ export default function App() {
               }`}
             >
               <Edit3 className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden xl:inline">2D Editor</span>
-              <span className="xl:hidden">2D Plan</span>
+              <span className="hidden lg:inline">2D Editor</span>
+              <span className="lg:hidden">2D</span>
             </button>
 
             {/* Split Screen Toggle */}
@@ -185,13 +185,13 @@ export default function App() {
         )}
 
         {/* Right: LLM Provider Pill & Action Buttons */}
-        <div className="flex items-center space-x-1.5 sm:space-x-2 shrink-0">
+        <div className="flex items-center space-x-1 sm:space-x-1.5 md:space-x-2 shrink-0">
           {/* LLM Provider Status Button */}
           <button
             id="open-provider-settings-btn"
             onClick={() => setIsProviderSettingsOpen(true)}
             title={`AI Provider: ${currentProviderMeta.name} (${hasApiKey ? 'Key configured' : 'Click to add key'})`}
-            className={`flex items-center space-x-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl border text-xs font-medium transition shrink-0 ${
+            className={`flex items-center space-x-1 sm:space-x-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl border text-xs font-medium transition shrink-0 ${
               hasApiKey
                 ? 'bg-neutral-800/80 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
                 : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'

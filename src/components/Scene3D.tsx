@@ -2,13 +2,11 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { FloorPlanData, Room, ViewMode, LightingPreset, FloorLevel } from '../types';
-import { buildArchitecturalModel, buildMultiFloorArchitecturalModel, WallMeshResult } from './3d/WallGeometry';
-import { generateFurnitureForFloor, createStaircaseFurniture, createBalconyFurniture, generateFurnitureForRoom } from './3d/FurnitureRegistry';
+import { buildMultiFloorArchitecturalModel, WallMeshResult } from './3d/WallGeometry';
+import { generateFurnitureForFloor } from './3d/FurnitureRegistry';
 import { FirstPersonController } from './3d/WalkthroughControls';
-import { WalkthroughTourEngine, TourState, TourStation } from './3d/WalkthroughTourEngine';
 import { Minimap } from './3d/Minimap';
 import {
-  Maximize2,
   Compass,
   Sun,
   Moon,
@@ -19,23 +17,19 @@ import {
   Sparkles,
   Move,
   RotateCcw,
+  RotateCw,
   Volume2,
   VolumeX,
   Zap,
   ZoomIn,
   ZoomOut,
-  Play,
-  Pause,
-  SkipForward,
-  SkipBack,
-  Footprints,
-  Video,
-  Info,
-  CheckCircle2,
   ChevronUp,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Building2,
-  Sliders,
+  Monitor,
+  Smartphone,
 } from 'lucide-react';
 
 interface Scene3DProps {
@@ -55,7 +49,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const orbitControlsRef = useRef<OrbitControls | null>(null);
   const fpControllerRef = useRef<FirstPersonController | null>(null);
-  const tourEngineRef = useRef<WalkthroughTourEngine | null>(null);
 
   // Groups
   const architecturalGroupRef = useRef<THREE.Group | null>(null);
@@ -63,6 +56,12 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
   const ceilingsGroupRef = useRef<THREE.Group | null>(null);
   const labelsGroupRef = useRef<THREE.Group | null>(null);
   const lightsGroupRef = useRef<THREE.Group | null>(null);
+
+  // Keep viewMode ref in sync to avoid stale closure in animation frame
+  const viewModeRef = useRef<ViewMode>(viewMode);
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
 
   // State
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
@@ -79,9 +78,18 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
   const [showZoomToast, setShowZoomToast] = useState(false);
   const zoomToastTimerRef = useRef<any>(null);
 
+  // Control Mode: 'desktop' (mouse/keyboard) or 'mobile' (touch/on-screen controls)
+  const [controlMode, setControlMode] = useState<'desktop' | 'mobile'>(() => {
+    if (typeof window !== 'undefined') {
+      const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      return hasTouch || window.innerWidth < 768 ? 'mobile' : 'desktop';
+    }
+    return 'desktop';
+  });
+
   // Multi-Floor State
-  const [activeFloorFilter, setActiveFloorFilter] = useState<string>('all'); // 'all' or floorId
-  const [explodedSpacing, setExplodedSpacing] = useState<number>(0); // 0 to 15 ft
+  const [activeFloorFilter, setActiveFloorFilter] = useState<string>('all');
+  const [explodedSpacing, setExplodedSpacing] = useState<number>(0);
 
   // Normalized floors list
   const floorsList = useMemo<FloorLevel[]>(() => {
@@ -103,32 +111,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
       },
     ];
   }, [plan]);
-
-  // Guided Walkthrough Tour State
-  const [tourState, setTourState] = useState<TourState>({
-    isActive: false,
-    isPaused: false,
-    currentStationIndex: 0,
-    currentStation: null,
-    progress: 0,
-    speed: 1.0,
-    statusText: 'Ready',
-  });
-  const [availableStations, setAvailableStations] = useState<TourStation[]>([]);
-
-  // Multi-touch and mouse drag tracking for smooth walkthrough look
-  const touchStateRef = useRef<{
-    touch1?: { x: number; y: number };
-    touch2?: { x: number; y: number };
-    initialPinchDist?: number;
-    initialFov?: number;
-  } | null>(null);
-
-  const mouseDragRef = useRef<{
-    isDragging: boolean;
-    lastX: number;
-    lastY: number;
-  }>({ isDragging: false, lastX: 0, lastY: 0 });
 
   // Step audio synth using Web Audio API
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -157,7 +139,7 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
       osc.start();
       osc.stop(ctx.currentTime + 0.09);
     } catch {
-      // Audio context might be restricted before user gesture
+      // Audio context might be restricted
     }
   }, [soundEnabled]);
 
@@ -318,8 +300,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
       ceilingsGroupRef.current.clear();
     }
 
-    const boundary = plan.outer_boundary || { width: 30, height: 50 };
-
     // Build multi-floor architectural model
     const architecturalModel: WallMeshResult = buildMultiFloorArchitecturalModel(plan, {
       activeFloorOnly: activeFloorFilter !== 'all',
@@ -330,9 +310,11 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
     architecturalGroupRef.current = architecturalModel.group;
     scene.add(architecturalModel.group);
 
-    // Update collision boxes & multi-floor data in FPS controller
+    // Update collision boxes & doors in FPS controller
     if (fpControllerRef.current) {
       fpControllerRef.current.setCollisionBoxes(architecturalModel.collisionBoxes);
+      fpControllerRef.current.setRooms(plan.rooms || []);
+      fpControllerRef.current.setDoors(plan.doors || []);
       fpControllerRef.current.setFloors(floorsList);
     }
 
@@ -359,11 +341,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
 
     furnitureGroup.visible = showFurniture;
     architecturalModel.ceilingsGroup.visible = showCeilings;
-
-    if (tourEngineRef.current) {
-      tourEngineRef.current.setPlan(plan);
-      setAvailableStations(tourEngineRef.current.getStations());
-    }
 
     createRoomLabels(scene);
     updateLighting(lighting, scene);
@@ -414,6 +391,10 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
 
     // First Person Controller setup
     const fpController = new FirstPersonController(camera, renderer.domElement);
+    fpController.setRooms(plan.rooms || []);
+    fpController.setDoors(plan.doors || []);
+    fpController.setFloors(floorsList);
+
     fpController.onRoomChange = (room) => {
       setActiveRoom(room);
       if (room) onSelectRoom?.(room);
@@ -424,37 +405,7 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
     fpController.onFovChange = (fov) => {
       setCurrentFov(Math.round(fov));
     };
-    fpController.onManualInput = () => {
-      if (tourEngineRef.current?.state.isActive && !tourEngineRef.current.state.isPaused) {
-        tourEngineRef.current.pauseTour();
-      }
-    };
     fpControllerRef.current = fpController;
-
-    // Tour Engine setup
-    const tourEngine = new WalkthroughTourEngine(camera);
-    tourEngine.setPlan(plan);
-    setAvailableStations(tourEngine.getStations());
-
-    tourEngine.onStateUpdate = (st) => {
-      setTourState(st);
-      if (st.currentStation) {
-        const allRooms = floorsList.flatMap((f) => f.rooms);
-        const matchingRoom = allRooms.find(
-          (r) => `station_${st.currentStation?.floorId}_${r.id}` === st.currentStation?.id || r.name === st.currentStation?.name
-        );
-        if (matchingRoom) {
-          setActiveRoom(matchingRoom);
-          onSelectRoom?.(matchingRoom);
-        }
-      }
-    };
-
-    tourEngine.onStepSound = () => {
-      playFootstep();
-    };
-
-    tourEngineRef.current = tourEngine;
 
     rebuildScene();
 
@@ -466,23 +417,14 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
       const delta = (time - lastTime) / 1000;
       lastTime = time;
 
-      if (viewMode === '3d_walkthrough') {
-        if (tourEngineRef.current && tourEngineRef.current.state.isActive && !tourEngineRef.current.state.isPaused) {
-          tourEngineRef.current.update(delta);
-          if (cameraRef.current) {
-            const euler = new THREE.Euler().setFromQuaternion(cameraRef.current.quaternion, 'YXZ');
-            setPlayerPos({
-              x: cameraRef.current.position.x,
-              y: cameraRef.current.position.y,
-              z: cameraRef.current.position.z,
-              yaw: euler.y,
-            });
-          }
-        } else if (fpControllerRef.current) {
+      if (viewModeRef.current === '3d_walkthrough') {
+        if (fpControllerRef.current) {
           fpControllerRef.current.update(delta);
         }
       } else {
-        orbitControls.update();
+        if (orbitControlsRef.current && orbitControlsRef.current.enabled) {
+          orbitControlsRef.current.update();
+        }
       }
 
       renderer.render(scene, camera);
@@ -520,6 +462,7 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
 
     if (viewMode === '3d_walkthrough') {
       orbitControlsRef.current.enabled = false;
+      fpControllerRef.current.enabled = true;
       const groundFloor = floorsList[0];
       const startRoom = groundFloor?.rooms[0];
       if (startRoom) {
@@ -533,6 +476,7 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
       setShowCeilings(true);
     } else {
       orbitControlsRef.current.enabled = true;
+      fpControllerRef.current.enabled = false;
       setIsPointerLocked(false);
       setShowCeilings(false);
       const boundary = plan.outer_boundary || { width: 30, height: 50 };
@@ -570,33 +514,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
     document.addEventListener('pointerlockchange', handleLockChange);
     return () => document.removeEventListener('pointerlockchange', handleLockChange);
   }, []);
-
-  // Mouse Drag to Look (Smooth Navigation Fix - prevents feeling locked!)
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (viewMode === '3d_walkthrough' && !isPointerLocked) {
-      mouseDragRef.current = {
-        isDragging: true,
-        lastX: e.clientX,
-        lastY: e.clientY,
-      };
-    }
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (viewMode === '3d_walkthrough' && mouseDragRef.current.isDragging && fpControllerRef.current) {
-      const dx = e.clientX - mouseDragRef.current.lastX;
-      const dy = e.clientY - mouseDragRef.current.lastY;
-      mouseDragRef.current.lastX = e.clientX;
-      mouseDragRef.current.lastY = e.clientY;
-
-      const sensitivity = 0.004;
-      fpControllerRef.current.rotateLook(dx * sensitivity, dy * sensitivity);
-    }
-  };
-
-  const handleMouseUp = () => {
-    mouseDragRef.current.isDragging = false;
-  };
 
   // Zoom Toast
   const triggerZoomToast = () => {
@@ -654,63 +571,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
     }
   };
 
-  // Touch look and pinch-to-zoom for mobile walkthrough
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (viewMode !== '3d_walkthrough') return;
-    if (e.touches.length === 1) {
-      const touch = e.touches[0];
-      touchStateRef.current = {
-        touch1: { x: touch.clientX, y: touch.clientY },
-      };
-    } else if (e.touches.length === 2) {
-      const t1 = e.touches[0];
-      const t2 = e.touches[1];
-      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-      const fov = fpControllerRef.current ? fpControllerRef.current.getFov() : 50;
-      touchStateRef.current = {
-        touch1: { x: t1.clientX, y: t1.clientY },
-        touch2: { x: t2.clientX, y: t2.clientY },
-        initialPinchDist: dist,
-        initialFov: fov,
-      };
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (viewMode !== '3d_walkthrough' || !touchStateRef.current || !fpControllerRef.current) return;
-
-    if (e.touches.length === 1 && touchStateRef.current.touch1 && !touchStateRef.current.initialPinchDist) {
-      const touch = e.touches[0];
-      const dx = touch.clientX - touchStateRef.current.touch1.x;
-      const dy = touch.clientY - touchStateRef.current.touch1.y;
-      touchStateRef.current.touch1 = { x: touch.clientX, y: touch.clientY };
-
-      const sensitivity = 0.005;
-      fpControllerRef.current.rotateLook(dx * sensitivity, dy * sensitivity);
-    } else if (e.touches.length === 2 && touchStateRef.current.initialPinchDist) {
-      const t1 = e.touches[0];
-      const t2 = e.touches[1];
-      const currentDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-      const scale = currentDist / Math.max(1, touchStateRef.current.initialPinchDist);
-      const baseFov = touchStateRef.current.initialFov || 50;
-      const targetFov = baseFov / scale;
-
-      fpControllerRef.current.setFov(targetFov);
-      setCurrentFov(Math.round(fpControllerRef.current.getFov()));
-      triggerZoomToast();
-    }
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    if (e.touches.length === 0) {
-      touchStateRef.current = null;
-    } else if (e.touches.length === 1) {
-      touchStateRef.current = {
-        touch1: { x: e.touches[0].clientX, y: e.touches[0].clientY },
-      };
-    }
-  };
-
   // Teleport to room
   const teleportToRoom = (room: Room, floorElevation = 0) => {
     if (fpControllerRef.current) {
@@ -723,41 +583,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
       setActiveRoom(room);
       onSelectRoom?.(room);
     }
-  };
-
-  // Guided Walkthrough Tour controls
-  const startGuidedTour = (startIdx = 0) => {
-    if (tourEngineRef.current) {
-      if (viewMode !== '3d_walkthrough') {
-        onViewModeChange('3d_walkthrough');
-      }
-      setIsPointerLocked(false);
-      tourEngineRef.current.startTour(startIdx);
-    }
-  };
-
-  const pauseGuidedTour = () => {
-    tourEngineRef.current?.pauseTour();
-  };
-
-  const resumeGuidedTour = () => {
-    tourEngineRef.current?.resumeTour();
-  };
-
-  const stopGuidedTour = () => {
-    tourEngineRef.current?.stopTour();
-  };
-
-  const nextTourStation = () => {
-    tourEngineRef.current?.nextStation();
-  };
-
-  const prevTourStation = () => {
-    tourEngineRef.current?.prevStation();
-  };
-
-  const setTourSpeed = (speed: number) => {
-    tourEngineRef.current?.setSpeed(speed);
   };
 
   // Snapshot capture
@@ -782,69 +607,68 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
   return (
     <div
       ref={containerRef}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
       className="relative w-full h-full min-h-[500px] overflow-hidden bg-neutral-950 select-none pb-16 md:pb-0"
     >
       <canvas ref={canvasRef} className="w-full h-full cursor-grab active:cursor-grabbing outline-none block touch-none" />
 
-      {/* Top Floating Control Bar (Responsive) */}
+      {/* Top Floating Control Bar */}
       <div className="absolute top-3 left-3 right-3 sm:top-4 sm:left-4 sm:right-4 flex flex-wrap items-center justify-between gap-2 pointer-events-none z-10">
-        {/* Left: View Mode Toggle & Guided Tour Starter */}
-        <div className="flex items-center space-x-1.5 bg-neutral-900/90 backdrop-blur-md p-1 sm:p-1.5 rounded-xl border border-neutral-700/60 shadow-xl pointer-events-auto">
+        {/* Left: View Mode Toggle & Mode Switcher */}
+        <div className="flex items-center space-x-1 sm:space-x-1.5 bg-neutral-900/90 backdrop-blur-md p-1 sm:p-1.5 rounded-xl border border-neutral-700/60 shadow-xl pointer-events-auto">
           <button
             id="dollhouse-mode-toggle"
-            onClick={() => {
-              if (tourState.isActive) stopGuidedTour();
-              onViewModeChange('3d_orbit');
-            }}
-            className={`flex items-center space-x-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            onClick={() => onViewModeChange('3d_orbit')}
+            className={`flex items-center space-x-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               viewMode === '3d_orbit'
-                ? 'bg-amber-500 text-neutral-950 font-bold shadow-md'
+                ? 'bg-amber-500 text-neutral-950 shadow-md'
                 : 'text-neutral-300 hover:text-white hover:bg-neutral-800'
             }`}
           >
             <Compass className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Dollhouse</span>
+            <span className="hidden sm:inline">Dollhouse 3D</span>
             <span className="sm:hidden">3D</span>
           </button>
           <button
             id="walkthrough-mode-toggle"
             onClick={() => onViewModeChange('3d_walkthrough')}
-            className={`flex items-center space-x-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              viewMode === '3d_walkthrough' && !tourState.isActive
-                ? 'bg-amber-500 text-neutral-950 font-bold shadow-md'
+            className={`flex items-center space-x-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              viewMode === '3d_walkthrough'
+                ? 'bg-amber-500 text-neutral-950 shadow-md'
                 : 'text-neutral-300 hover:text-white hover:bg-neutral-800'
             }`}
           >
             <Move className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Free Roam Walk</span>
+            <span className="hidden sm:inline">Walkthrough</span>
             <span className="sm:hidden">Walk</span>
           </button>
-          {/* Direct Guided Cinematic Tour Button */}
-          <button
-            id="guided-tour-toggle-btn"
-            onClick={() => {
-              if (tourState.isActive) {
-                if (tourState.isPaused) resumeGuidedTour();
-                else pauseGuidedTour();
-              } else {
-                startGuidedTour(0);
-              }
-            }}
-            className={`flex items-center space-x-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              tourState.isActive
-                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-neutral-950 shadow-lg ring-2 ring-amber-400/50'
-                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500 hover:text-neutral-950'
-            }`}
-          >
-            <Video className="w-3.5 h-3.5" />
-            <span>{tourState.isActive ? (tourState.isPaused ? '▶ Resume Tour' : '⏸ Tour Playing') : '🎬 Auto Tour'}</span>
-          </button>
+
+          {/* Explicit Desktop vs Touch/Mobile Mode Switcher Icon */}
+          <div className="border-l border-neutral-700 pl-1 sm:pl-1.5 ml-1">
+            <button
+              id="toggle-control-mode-btn"
+              onClick={() => setControlMode((prev) => (prev === 'desktop' ? 'mobile' : 'desktop'))}
+              title={`Switch between Desktop (Mouse/Keyboard) and Mobile (Touchscreen) Mode`}
+              className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                controlMode === 'desktop'
+                  ? 'bg-neutral-800 text-amber-300 border border-amber-500/40 hover:bg-neutral-700'
+                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/50 hover:bg-amber-500/30'
+              }`}
+            >
+              {controlMode === 'desktop' ? (
+                <>
+                  <Monitor className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">Desktop Mode</span>
+                  <span className="sm:hidden">Desktop</span>
+                </>
+              ) : (
+                <>
+                  <Smartphone className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">Mobile/Touch Mode</span>
+                  <span className="sm:hidden">Touch</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Center: Multi-Floor Switcher & Exploded View Slider */}
@@ -1025,216 +849,9 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
             />
           </div>
 
-          {/* --- ACTIVE CINEMATIC GUIDED TOUR HUD --- */}
-          {tourState.isActive && tourState.currentStation ? (
-            <div className="absolute inset-0 pointer-events-none z-20 flex flex-col justify-between p-3 sm:p-5">
-              {/* Top Station Card */}
-              <div className="max-w-md w-full mx-auto bg-neutral-900/95 backdrop-blur-md p-3.5 sm:p-4 rounded-2xl border border-amber-500/40 shadow-2xl pointer-events-auto space-y-2.5 transition-all">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-                    <span className="text-[11px] font-mono text-amber-400 uppercase tracking-wider font-bold">
-                      Station {tourState.currentStationIndex + 1} of {availableStations.length}
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-neutral-400 bg-neutral-800 px-2 py-0.5 rounded-full font-mono">
-                    {tourState.statusText}
-                  </span>
-                </div>
-
-                <div>
-                  <h3 className="text-base sm:text-lg font-bold text-white flex items-center justify-between">
-                    <span>{tourState.currentStation.name}</span>
-                    <span className="text-xs text-amber-300 font-mono font-normal">
-                      {tourState.currentStation.details.dimensions}
-                    </span>
-                  </h3>
-                  <p className="text-xs text-neutral-300 mt-1 leading-relaxed">
-                    {tourState.currentStation.details.description}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[10px]">
-                  {tourState.currentStation.details.flooring && (
-                    <span className="px-2 py-0.5 rounded-md bg-neutral-800 text-neutral-300 border border-neutral-700">
-                      🪵 {tourState.currentStation.details.flooring}
-                    </span>
-                  )}
-                  {tourState.currentStation.details.vastuZone && (
-                    <span className="px-2 py-0.5 rounded-md bg-amber-950/60 text-amber-300 border border-amber-700/50">
-                      🧭 Vastu: {tourState.currentStation.details.vastuZone}
-                    </span>
-                  )}
-                </div>
-
-                {/* Progress Bar */}
-                <div className="w-full bg-neutral-800 h-1.5 rounded-full overflow-hidden">
-                  <div
-                    className="bg-gradient-to-r from-amber-500 to-orange-400 h-full transition-all duration-300"
-                    style={{ width: `${Math.round(tourState.progress * 100)}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* Bottom Tour Player Controls */}
-              <div className="max-w-lg w-full mx-auto bg-neutral-900/95 backdrop-blur-md p-2.5 sm:p-3 rounded-2xl border border-neutral-700 shadow-2xl pointer-events-auto flex items-center justify-between gap-2">
-                {/* Station Nav buttons */}
-                <div className="flex items-center space-x-1">
-                  <button
-                    id="tour-prev-btn"
-                    onClick={prevTourStation}
-                    disabled={tourState.currentStationIndex === 0}
-                    title="Previous Room"
-                    className="p-2 rounded-xl text-neutral-300 hover:text-white hover:bg-neutral-800 disabled:opacity-30 transition"
-                  >
-                    <SkipBack className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    id="tour-play-pause-btn"
-                    onClick={() => {
-                      if (tourState.isPaused) resumeGuidedTour();
-                      else pauseGuidedTour();
-                    }}
-                    title={tourState.isPaused ? 'Resume Walk' : 'Pause Walk'}
-                    className="p-2.5 rounded-xl bg-amber-500 text-neutral-950 font-bold hover:bg-amber-400 transition active:scale-95 shadow-md"
-                  >
-                    {tourState.isPaused ? <Play className="w-4 h-4 fill-current" /> : <Pause className="w-4 h-4 fill-current" />}
-                  </button>
-
-                  <button
-                    id="tour-next-btn"
-                    onClick={nextTourStation}
-                    disabled={tourState.currentStationIndex === availableStations.length - 1}
-                    title="Next Room"
-                    className="p-2 rounded-xl text-neutral-300 hover:text-white hover:bg-neutral-800 disabled:opacity-30 transition"
-                  >
-                    <SkipForward className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Room Selector Dropdown */}
-                <select
-                  id="tour-station-select"
-                  value={tourState.currentStationIndex}
-                  onChange={(e) => startGuidedTour(Number(e.target.value))}
-                  className="bg-neutral-950 text-neutral-200 text-xs px-2.5 py-1.5 rounded-xl border border-neutral-700 outline-none max-w-[140px] sm:max-w-[180px] truncate"
-                >
-                  {availableStations.map((st, idx) => (
-                    <option key={st.id} value={idx}>
-                      {idx + 1}. {st.name}
-                    </option>
-                  ))}
-                </select>
-
-                {/* Speed Toggle */}
-                <div className="flex items-center bg-neutral-950 p-0.5 rounded-xl border border-neutral-800 text-[10px]">
-                  {[1.0, 1.5, 2.0].map((spd) => (
-                    <button
-                      key={spd}
-                      onClick={() => setTourSpeed(spd)}
-                      className={`px-1.5 py-1 rounded-lg font-mono font-bold transition ${
-                        tourState.speed === spd
-                          ? 'bg-amber-500 text-neutral-950'
-                          : 'text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      {spd}x
-                    </button>
-                  ))}
-                </div>
-
-                {/* Free Roam Switch */}
-                <button
-                  id="stop-tour-btn"
-                  onClick={stopGuidedTour}
-                  title="Switch to Free Roam"
-                  className="px-2.5 py-1.5 rounded-xl text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800 hover:bg-neutral-700 transition"
-                >
-                  Free Walk
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {/* --- MANUAL FREE-ROAM PROMPT & OVERLAY --- */}
-          {!tourState.isActive && !isPointerLocked ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-[2px] z-30 pointer-events-auto p-4">
-              <div className="bg-neutral-900/95 p-5 sm:p-6 rounded-2xl border border-neutral-700 max-w-lg w-full text-center shadow-2xl space-y-4">
-                <div className="w-12 h-12 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
-                  <Move className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-base sm:text-lg font-bold text-white">First-Person 3D Walkthrough</h3>
-                  <p className="text-xs sm:text-sm text-neutral-300 mt-1">
-                    Explore your home from realistic human eye height (5.5 ft). Climb stairs to explore upper floors seamlessly.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                  <button
-                    id="modal-start-guided-tour-btn"
-                    onClick={() => startGuidedTour(0)}
-                    className="p-3.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-neutral-950 font-bold rounded-xl shadow-lg transition-all text-sm flex flex-col items-center justify-center space-y-1 text-center"
-                  >
-                    <span className="flex items-center space-x-1.5">
-                      <Video className="w-4 h-4" />
-                      <span>Cinematic Auto Tour</span>
-                    </span>
-                    <span className="text-[10px] opacity-80 font-normal">
-                      Visits all rooms & floors in sequence
-                    </span>
-                  </button>
-
-                  <button
-                    id="start-walkthrough-btn"
-                    onClick={() => fpControllerRef.current?.requestPointerLock()}
-                    className="p-3.5 bg-neutral-800 hover:bg-neutral-700 text-white font-bold rounded-xl border border-neutral-700 shadow-lg transition-all text-sm flex flex-col items-center justify-center space-y-1 text-center"
-                  >
-                    <span className="flex items-center space-x-1.5">
-                      <Move className="w-4 h-4 text-amber-400" />
-                      <span>Free-Roam Gameplay</span>
-                    </span>
-                    <span className="text-[10px] text-neutral-400 font-normal">
-                      WASD / Arrow keys + Mouse drag look
-                    </span>
-                  </button>
-                </div>
-
-                <div className="hidden sm:grid grid-cols-3 gap-1.5 text-[11px] text-neutral-400 bg-neutral-950 p-2.5 rounded-xl text-left font-mono">
-                  <div>
-                    <span className="text-amber-400 font-bold">W / ↑</span> Forward
-                  </div>
-                  <div>
-                    <span className="text-amber-400 font-bold">S / ↓</span> Backward
-                  </div>
-                  <div>
-                    <span className="text-amber-400 font-bold">A / D</span> Strafe
-                  </div>
-                  <div>
-                    <span className="text-amber-400 font-bold">SHIFT</span> Sprint
-                  </div>
-                  <div>
-                    <span className="text-amber-400 font-bold">Stairs</span> Walk Up/Down
-                  </div>
-                  <div>
-                    <span className="text-amber-400 font-bold">ESC</span> Release
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {/* Active Crosshair when pointer locked */}
-          {!tourState.isActive && isPointerLocked && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-              <div className="w-2 h-2 rounded-full bg-amber-400/80 shadow-md ring-2 ring-white/30" />
-            </div>
-          )}
-
-          {/* Active Room Indicator Banner at Bottom during Free Roam */}
-          {!tourState.isActive && activeRoom && (
-            <div className="absolute bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 bg-neutral-900/90 backdrop-blur-md px-4 py-1.5 rounded-full border border-amber-500/50 shadow-xl flex items-center space-x-2 pointer-events-none z-20">
+          {/* Active Room Indicator Banner at Bottom */}
+          {activeRoom && (
+            <div className="absolute bottom-24 md:bottom-6 left-1/2 -translate-x-1/2 bg-neutral-900/90 backdrop-blur-md px-4 py-1.5 rounded-full border border-amber-500/50 shadow-xl flex items-center space-x-2 pointer-events-none z-20">
               <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
               <div className="text-center">
                 <span className="text-xs font-bold text-white uppercase tracking-wider">{activeRoom.name}</span>
@@ -1245,92 +862,202 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
             </div>
           )}
 
-          {/* Mobile Virtual Touch Controls (Free Roam) */}
-          {!tourState.isActive && (
-            <div className="absolute bottom-20 left-4 z-20 flex items-center space-x-3 pointer-events-auto md:hidden">
-              {/* D-Pad */}
-              <div className="grid grid-cols-3 gap-1 bg-neutral-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-neutral-700 shadow-2xl">
-                <div />
+          {/* Desktop Controls Helper Banner (When in Desktop Mode) */}
+          {controlMode === 'desktop' && (
+            <div className="absolute top-16 left-3 sm:top-20 sm:left-4 z-20 pointer-events-none bg-neutral-900/90 backdrop-blur-md p-2.5 rounded-xl border border-neutral-700/60 shadow-xl text-xs text-neutral-300 max-w-xs space-y-1">
+              <div className="flex items-center space-x-1.5 text-amber-400 font-bold">
+                <Monitor className="w-3.5 h-3.5" />
+                <span>Desktop Controls</span>
+              </div>
+              <div className="font-mono text-[11px] text-neutral-300 space-y-0.5">
+                <p><span className="text-amber-400 font-bold">W A S D / Arrows:</span> Walk & Strafe</p>
+                <p><span className="text-amber-400 font-bold">Drag Mouse:</span> Look 360° around</p>
+                <p><span className="text-amber-400 font-bold">Scroll Wheel / Pinch:</span> Zoom FOV</p>
+                <p><span className="text-amber-400 font-bold">Shift:</span> Sprint / Run</p>
+              </div>
+            </div>
+          )}
+
+          {/* Touch / Mobile Virtual Touch Controller HUD (When in Mobile Mode or touch screen) */}
+          {controlMode === 'mobile' && (
+            <>
+              {/* Left Side: Virtual D-Pad Movement & Sprint */}
+              <div className="absolute bottom-20 left-3 sm:left-6 z-20 flex items-center space-x-2 pointer-events-auto">
+                {/* Virtual D-Pad */}
+                <div className="grid grid-cols-3 gap-1 bg-neutral-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-neutral-700 shadow-2xl">
+                  <div />
+                  <button
+                    id="touch-forward-btn"
+                    onTouchStart={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveForward = true;
+                    }}
+                    onTouchEnd={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveForward = false;
+                    }}
+                    onMouseDown={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveForward = true;
+                    }}
+                    onMouseUp={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveForward = false;
+                    }}
+                    className="w-11 h-11 bg-neutral-800 rounded-xl text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95 shadow-md"
+                  >
+                    <ChevronUp className="w-6 h-6" />
+                  </button>
+                  <div />
+                  <button
+                    id="touch-left-btn"
+                    onTouchStart={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveLeft = true;
+                    }}
+                    onTouchEnd={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveLeft = false;
+                    }}
+                    onMouseDown={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveLeft = true;
+                    }}
+                    onMouseUp={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveLeft = false;
+                    }}
+                    className="w-11 h-11 bg-neutral-800 rounded-xl text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95 shadow-md"
+                  >
+                    <ChevronLeft className="w-6 h-6" />
+                  </button>
+                  <button
+                    id="touch-backward-btn"
+                    onTouchStart={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveBackward = true;
+                    }}
+                    onTouchEnd={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveBackward = false;
+                    }}
+                    onMouseDown={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveBackward = true;
+                    }}
+                    onMouseUp={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveBackward = false;
+                    }}
+                    className="w-11 h-11 bg-neutral-800 rounded-xl text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95 shadow-md"
+                  >
+                    <ChevronDown className="w-6 h-6" />
+                  </button>
+                  <button
+                    id="touch-right-btn"
+                    onTouchStart={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveRight = true;
+                    }}
+                    onTouchEnd={(e) => {
+                      e.preventDefault();
+                      if (fpControllerRef.current) fpControllerRef.current.moveRight = false;
+                    }}
+                    onMouseDown={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveRight = true;
+                    }}
+                    onMouseUp={() => {
+                      if (fpControllerRef.current) fpControllerRef.current.moveRight = false;
+                    }}
+                    className="w-11 h-11 bg-neutral-800 rounded-xl text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95 shadow-md"
+                  >
+                    <ChevronRight className="w-6 h-6" />
+                  </button>
+                </div>
+
+                {/* Mobile Sprint Toggle */}
                 <button
-                  id="touch-forward-btn"
-                  onTouchStart={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveForward = true;
+                  id="mobile-sprint-toggle"
+                  onClick={() => {
+                    const nextSprint = !isMobileSprinting;
+                    setIsMobileSprinting(nextSprint);
+                    if (fpControllerRef.current) {
+                      fpControllerRef.current.isRunning = nextSprint;
+                    }
                   }}
-                  onTouchEnd={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveForward = false;
-                  }}
-                  className="w-10 h-10 bg-neutral-800 rounded-lg text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-black transition active:scale-95"
+                  className={`p-3 rounded-2xl border shadow-xl flex flex-col items-center justify-center transition active:scale-95 ${
+                    isMobileSprinting
+                      ? 'bg-amber-500 text-neutral-950 font-bold border-amber-400 shadow-amber-500/20'
+                      : 'bg-neutral-900/90 text-neutral-400 border-neutral-700'
+                  }`}
                 >
-                  ▲
-                </button>
-                <div />
-                <button
-                  id="touch-left-btn"
-                  onTouchStart={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveLeft = true;
-                  }}
-                  onTouchEnd={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveLeft = false;
-                  }}
-                  className="w-10 h-10 bg-neutral-800 rounded-lg text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-black transition active:scale-95"
-                >
-                  ◀
-                </button>
-                <button
-                  id="touch-backward-btn"
-                  onTouchStart={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveBackward = true;
-                  }}
-                  onTouchEnd={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveBackward = false;
-                  }}
-                  className="w-10 h-10 bg-neutral-800 rounded-lg text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-black transition active:scale-95"
-                >
-                  ▼
-                </button>
-                <button
-                  id="touch-right-btn"
-                  onTouchStart={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveRight = true;
-                  }}
-                  onTouchEnd={(e) => {
-                    e.preventDefault();
-                    if (fpControllerRef.current) fpControllerRef.current.moveRight = false;
-                  }}
-                  className="w-10 h-10 bg-neutral-800 rounded-lg text-amber-400 font-bold flex items-center justify-center active:bg-amber-500 active:text-black transition active:scale-95"
-                >
-                  ▶
+                  <Zap className="w-5 h-5" />
+                  <span className="text-[9px] mt-0.5 font-bold">RUN</span>
                 </button>
               </div>
 
-              {/* Mobile Sprint Toggle */}
-              <button
-                id="mobile-sprint-toggle"
-                onClick={() => {
-                  const nextSprint = !isMobileSprinting;
-                  setIsMobileSprinting(nextSprint);
-                  if (fpControllerRef.current) {
-                    fpControllerRef.current.isRunning = nextSprint;
-                  }
-                }}
-                className={`p-3 rounded-2xl border shadow-xl flex flex-col items-center justify-center transition active:scale-95 ${
-                  isMobileSprinting
-                    ? 'bg-amber-500 text-neutral-950 font-bold border-amber-400 shadow-amber-500/20'
-                    : 'bg-neutral-900/90 text-neutral-400 border-neutral-700'
-                }`}
-              >
-                <Zap className="w-5 h-5" />
-                <span className="text-[9px] mt-0.5 font-bold">RUN</span>
-              </button>
-            </div>
+              {/* Right Side: Quick Turn & Look Controls */}
+              <div className="absolute bottom-20 right-3 sm:right-6 z-20 flex flex-col items-end space-y-1.5 pointer-events-auto">
+                {/* 90-degree quick turn buttons */}
+                <div className="flex items-center space-x-1.5 bg-neutral-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-neutral-700 shadow-2xl">
+                  <button
+                    id="quick-turn-left-btn"
+                    onClick={() => fpControllerRef.current?.turnByAngle(Math.PI / 4)}
+                    title="Turn Left 45°"
+                    className="w-10 h-10 bg-neutral-800 rounded-xl text-amber-400 flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                  </button>
+                  <button
+                    id="quick-turn-right-btn"
+                    onClick={() => fpControllerRef.current?.turnByAngle(-Math.PI / 4)}
+                    title="Turn Right 45°"
+                    className="w-10 h-10 bg-neutral-800 rounded-xl text-amber-400 flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95"
+                  >
+                    <RotateCw className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Tilt Look Up / Down buttons */}
+                <div className="flex items-center space-x-1.5 bg-neutral-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-neutral-700 shadow-2xl">
+                  <button
+                    id="quick-tilt-up-btn"
+                    onClick={() => fpControllerRef.current?.tiltByAngle(0.25)}
+                    title="Look Up"
+                    className="w-10 h-10 bg-neutral-800 rounded-xl text-amber-400 flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95"
+                  >
+                    <ChevronUp className="w-5 h-5" />
+                  </button>
+                  <button
+                    id="quick-tilt-down-btn"
+                    onClick={() => fpControllerRef.current?.tiltByAngle(-0.25)}
+                    title="Look Down"
+                    className="w-10 h-10 bg-neutral-800 rounded-xl text-amber-400 flex items-center justify-center active:bg-amber-500 active:text-neutral-950 transition active:scale-95"
+                  >
+                    <ChevronDown className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+            </>
           )}
+
+          {/* Quick Room Jump Chips Bar in Walkthrough Mode */}
+          <div className="absolute bottom-3 left-3 right-3 z-20 flex items-center space-x-1.5 overflow-x-auto max-w-full bg-neutral-900/90 backdrop-blur-md p-1.5 rounded-xl border border-neutral-700/60 shadow-xl pointer-events-auto scrollbar-none">
+            <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider px-1.5 shrink-0">Teleport:</span>
+            {floorsList
+              .filter((f) => activeFloorFilter === 'all' || f.id === activeFloorFilter)
+              .flatMap((f, fIdx) =>
+                f.rooms.map((room) => ({
+                  ...room,
+                  floorElev: (f.elevation ?? (fIdx * (f.height || 10))) + (fIdx * explodedSpacing),
+                  floorName: f.name,
+                }))
+              )
+              .map((room) => (
+                <button
+                  key={room.id}
+                  id={`walkthrough-jump-${room.id}`}
+                  onClick={() => teleportToRoom(room, room.floorElev)}
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-neutral-300 bg-neutral-800 hover:bg-neutral-700 hover:text-white whitespace-nowrap transition active:scale-95 shrink-0"
+                >
+                  {room.name}
+                </button>
+              ))}
+          </div>
         </>
       )}
 
@@ -1369,13 +1096,13 @@ export const Scene3D: React.FC<Scene3DProps> = ({ plan, viewMode, onViewModeChan
           {/* Reset Orbit Camera */}
           <div className="pointer-events-auto shrink-0 flex items-center space-x-2">
             <button
-              id="start-tour-from-orbit-btn"
-              onClick={() => startGuidedTour(0)}
-              title="Start Cinematic Walkthrough"
-              className="flex items-center space-x-1.5 bg-gradient-to-r from-amber-500 to-orange-500 text-neutral-950 px-3 py-2 rounded-xl font-bold text-xs shadow-xl transition active:scale-95"
+              id="switch-to-walk-from-orbit-btn"
+              onClick={() => onViewModeChange('3d_walkthrough')}
+              title="Enter 3D Walkthrough"
+              className="flex items-center space-x-1.5 bg-gradient-to-r from-amber-500 to-orange-500 text-neutral-950 px-3.5 py-2 rounded-xl font-bold text-xs shadow-xl transition active:scale-95"
             >
-              <Video className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Start Walkthrough</span>
+              <Move className="w-3.5 h-3.5" />
+              <span>Enter Walkthrough</span>
             </button>
 
             <button

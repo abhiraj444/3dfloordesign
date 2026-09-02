@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Room, FloorLevel, StaircaseData } from '../../types';
+import { Room, FloorLevel, StaircaseData, Door } from '../../types';
 
 export interface WalkthroughState {
   position: THREE.Vector3;
@@ -14,8 +14,12 @@ export class FirstPersonController {
   private domElement: HTMLElement;
   private collisionBoxes: THREE.Box3[] = [];
   private rooms: Room[] = [];
+  private doors: Door[] = [];
   private floors: FloorLevel[] = [];
   private currentFloorElevation = 0;
+
+  // Master switch
+  public enabled = false;
 
   // Motion state
   public moveForward = false;
@@ -29,11 +33,20 @@ export class FirstPersonController {
   private lastPointerX = 0;
   private lastPointerY = 0;
 
+  // Touch state
+  private touchState: {
+    lastTouch1?: { x: number; y: number };
+    lastTouch2?: { x: number; y: number };
+    initialPinchDist?: number;
+    initialFov?: number;
+    lastMidpoint?: { x: number; y: number };
+  } | null = null;
+
   // Physics & Navigation parameters
   public eyeHeight = 5.5; // eye-level in feet
-  public playerRadius = 0.45; // collision buffer in feet (fits easily through 3ft doors)
-  public speed = 8.5; // ft/sec
-  public runMultiplier = 1.6;
+  public playerRadius = 0.2; // nimble collision buffer in feet (fits through all doors & halls)
+  public speed = 9.5; // ft/sec
+  public runMultiplier = 1.75;
 
   // Internal vectors
   private velocity = new THREE.Vector3();
@@ -59,6 +72,9 @@ export class FirstPersonController {
   private boundMouseUp: (e: MouseEvent) => void;
   private boundWheel: (e: WheelEvent) => void;
   private boundPointerLockChange: () => void;
+  private boundTouchStart: (e: TouchEvent) => void;
+  private boundTouchMove: (e: TouchEvent) => void;
+  private boundTouchEnd: (e: TouchEvent) => void;
 
   constructor(camera: THREE.Camera, domElement: HTMLElement) {
     this.camera = camera;
@@ -71,6 +87,9 @@ export class FirstPersonController {
     this.boundMouseUp = this.onMouseUp.bind(this);
     this.boundWheel = this.onWheel.bind(this);
     this.boundPointerLockChange = this.onPointerLockChange.bind(this);
+    this.boundTouchStart = this.onTouchStart.bind(this);
+    this.boundTouchMove = this.onTouchMove.bind(this);
+    this.boundTouchEnd = this.onTouchEnd.bind(this);
 
     this.initEventListeners();
   }
@@ -81,6 +100,10 @@ export class FirstPersonController {
 
   public setRooms(rooms: Room[]) {
     this.rooms = rooms;
+  }
+
+  public setDoors(doors: Door[]) {
+    this.doors = doors;
   }
 
   public setFloors(floors: FloorLevel[]) {
@@ -112,6 +135,10 @@ export class FirstPersonController {
     this.domElement.addEventListener('mousedown', this.boundMouseDown);
     window.addEventListener('mouseup', this.boundMouseUp);
     this.domElement.addEventListener('wheel', this.boundWheel, { passive: false });
+    this.domElement.addEventListener('touchstart', this.boundTouchStart, { passive: false });
+    this.domElement.addEventListener('touchmove', this.boundTouchMove, { passive: false });
+    this.domElement.addEventListener('touchend', this.boundTouchEnd);
+    this.domElement.addEventListener('touchcancel', this.boundTouchEnd);
     document.addEventListener('pointerlockchange', this.boundPointerLockChange);
   }
 
@@ -130,6 +157,7 @@ export class FirstPersonController {
   }
 
   private onMouseDown(event: MouseEvent) {
+    if (!this.enabled) return;
     if (event.button === 0) {
       this.isPointerDown = true;
       this.lastPointerX = event.clientX;
@@ -142,10 +170,83 @@ export class FirstPersonController {
   }
 
   private onWheel(event: WheelEvent) {
-    if (!this.isLocked && !this.isPointerDown) return;
+    if (!this.enabled) return;
     event.preventDefault();
     const delta = event.deltaY > 0 ? 3 : -3;
     this.zoomFov(delta);
+  }
+
+  private onTouchStart(event: TouchEvent) {
+    if (!this.enabled) return;
+    if (event.touches.length === 1) {
+      const touch = event.touches[0];
+      this.touchState = {
+        lastTouch1: { x: touch.clientX, y: touch.clientY },
+      };
+    } else if (event.touches.length >= 2) {
+      const t1 = event.touches[0];
+      const t2 = event.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const midX = (t1.clientX + t2.clientX) / 2;
+      const midY = (t1.clientY + t2.clientY) / 2;
+      this.touchState = {
+        lastTouch1: { x: t1.clientX, y: t1.clientY },
+        lastTouch2: { x: t2.clientX, y: t2.clientY },
+        initialPinchDist: dist,
+        initialFov: this.getFov(),
+        lastMidpoint: { x: midX, y: midY },
+      };
+    }
+  }
+
+  private onTouchMove(event: TouchEvent) {
+    if (!this.enabled || !this.touchState) return;
+    event.preventDefault(); // Prevent page scroll during 3D walkthrough
+
+    if (event.touches.length === 1 && this.touchState.lastTouch1) {
+      const touch = event.touches[0];
+      const dx = touch.clientX - this.touchState.lastTouch1.x;
+      const dy = touch.clientY - this.touchState.lastTouch1.y;
+      this.touchState.lastTouch1 = { x: touch.clientX, y: touch.clientY };
+
+      const sensitivity = 0.005;
+      this.rotateLook(dx * sensitivity, dy * sensitivity);
+    } else if (event.touches.length >= 2) {
+      const t1 = event.touches[0];
+      const t2 = event.touches[1];
+      const currentDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const midX = (t1.clientX + t2.clientX) / 2;
+      const midY = (t1.clientY + t2.clientY) / 2;
+
+      // 1. Pinch to zoom FOV
+      if (this.touchState.initialPinchDist && this.touchState.initialFov) {
+        const scale = currentDist / Math.max(1, this.touchState.initialPinchDist);
+        const targetFov = this.touchState.initialFov / scale;
+        this.setFov(targetFov);
+      }
+
+      // 2. Drag midpoint to rotate look
+      if (this.touchState.lastMidpoint) {
+        const dMidX = midX - this.touchState.lastMidpoint.x;
+        const dMidY = midY - this.touchState.lastMidpoint.y;
+        this.rotateLook(dMidX * 0.004, dMidY * 0.004);
+      }
+
+      this.touchState.lastMidpoint = { x: midX, y: midY };
+      this.touchState.lastTouch1 = { x: t1.clientX, y: t1.clientY };
+      this.touchState.lastTouch2 = { x: t2.clientX, y: t2.clientY };
+    }
+  }
+
+  private onTouchEnd(event: TouchEvent) {
+    if (!this.enabled) return;
+    if (event.touches.length === 0) {
+      this.touchState = null;
+    } else if (event.touches.length === 1) {
+      this.touchState = {
+        lastTouch1: { x: event.touches[0].clientX, y: event.touches[0].clientY },
+      };
+    }
   }
 
   public getFov(): number {
@@ -190,6 +291,7 @@ export class FirstPersonController {
   }
 
   private onMouseMove(event: MouseEvent) {
+    if (!this.enabled) return;
     if (this.isLocked) {
       const movementX = event.movementX || 0;
       const movementY = event.movementY || 0;
@@ -202,7 +304,7 @@ export class FirstPersonController {
       this.euler.y -= movementX * 0.0024;
       this.euler.x -= movementY * 0.0024;
 
-      const maxPitch = Math.PI / 2 - 0.05;
+      const maxPitch = 1.4; // approx 80 degrees
       this.euler.x = Math.max(-maxPitch, Math.min(maxPitch, this.euler.x));
       this.camera.quaternion.setFromEuler(this.euler);
     } else if (this.isPointerDown) {
@@ -217,10 +319,10 @@ export class FirstPersonController {
       }
 
       this.euler.setFromQuaternion(this.camera.quaternion);
-      this.euler.y -= dx * 0.0035;
-      this.euler.x -= dy * 0.0035;
+      this.euler.y -= dx * 0.004;
+      this.euler.x -= dy * 0.004;
 
-      const maxPitch = Math.PI / 2 - 0.05;
+      const maxPitch = 1.4;
       this.euler.x = Math.max(-maxPitch, Math.min(maxPitch, this.euler.x));
       this.camera.quaternion.setFromEuler(this.euler);
     }
@@ -232,12 +334,29 @@ export class FirstPersonController {
     this.euler.setFromQuaternion(this.camera.quaternion);
     this.euler.y -= deltaYaw;
     this.euler.x -= deltaPitch;
-    const maxPitch = Math.PI / 2 - 0.05;
+    const maxPitch = 1.4;
     this.euler.x = Math.max(-maxPitch, Math.min(maxPitch, this.euler.x));
     this.camera.quaternion.setFromEuler(this.euler);
   }
 
+  // Turn by fixed angle (e.g. 90 deg or 45 deg buttons)
+  public turnByAngle(angleRad: number) {
+    this.onManualInput?.();
+    this.euler.setFromQuaternion(this.camera.quaternion);
+    this.euler.y += angleRad;
+    this.camera.quaternion.setFromEuler(this.euler);
+  }
+
+  // Tilt look up or down
+  public tiltByAngle(angleRad: number) {
+    this.onManualInput?.();
+    this.euler.setFromQuaternion(this.camera.quaternion);
+    this.euler.x = Math.max(-1.4, Math.min(1.4, this.euler.x + angleRad));
+    this.camera.quaternion.setFromEuler(this.euler);
+  }
+
   private onKeyDown(event: KeyboardEvent) {
+    if (!this.enabled) return;
     // Only process navigation keys if not typing in an input/textarea
     const targetTag = (event.target as HTMLElement)?.tagName?.toLowerCase();
     if (targetTag === 'input' || targetTag === 'textarea') return;
@@ -271,6 +390,7 @@ export class FirstPersonController {
   }
 
   private onKeyUp(event: KeyboardEvent) {
+    if (!this.enabled) return;
     switch (event.code) {
       case 'ArrowUp':
       case 'KeyW':
@@ -297,17 +417,30 @@ export class FirstPersonController {
 
   /**
    * Collision checking against wall bounding boxes at the current vertical height
+   * Grants doorway clearance so player can pass through any door opening seamlessly
    */
   private checkCollision(newPos: THREE.Vector3): boolean {
+    // Check if near any doorway - if so, allow smooth passage
+    for (const d of this.doors) {
+      const dx = newPos.x - d.x;
+      const dz = newPos.z - d.y;
+      if (dx * dx + dz * dz < 2.8 * 2.8) {
+        return false; // Open passage near doors
+      }
+    }
+
     const playerBox = new THREE.Box3();
     const feetY = newPos.y - this.eyeHeight;
-    const min = new THREE.Vector3(newPos.x - this.playerRadius, feetY + 0.5, newPos.z - this.playerRadius);
-    const max = new THREE.Vector3(newPos.x + this.playerRadius, feetY + 6.5, newPos.z + this.playerRadius);
+    const min = new THREE.Vector3(newPos.x - this.playerRadius, feetY + 0.8, newPos.z - this.playerRadius);
+    const max = new THREE.Vector3(newPos.x + this.playerRadius, feetY + 5.2, newPos.z + this.playerRadius);
     playerBox.set(min, max);
 
     for (const wallBox of this.collisionBoxes) {
-      if (playerBox.intersectsBox(wallBox)) {
-        return true;
+      // Only check walls on the same vertical floor slice
+      if (wallBox.min.y <= newPos.y + 1.0 && wallBox.max.y >= feetY + 0.5) {
+        if (playerBox.intersectsBox(wallBox)) {
+          return true;
+        }
       }
     }
     return false;
@@ -332,7 +465,7 @@ export class FirstPersonController {
 
     for (const item of allStairs) {
       const s = item.stair;
-      const margin = 0.6;
+      const margin = 0.8;
       if (
         pos.x >= s.x - margin &&
         pos.x <= s.x + s.width + margin &&
@@ -395,7 +528,7 @@ export class FirstPersonController {
   }
 
   /**
-   * Update motion on every animation frame
+   * Update motion on every animation frame with smooth wall sliding
    */
   public update(delta: number) {
     const dt = Math.min(delta, 0.1); // clamp to avoid physics tunnels on lag spikes
@@ -406,7 +539,9 @@ export class FirstPersonController {
 
     this.direction.z = Number(this.moveForward) - Number(this.moveBackward);
     this.direction.x = Number(this.moveRight) - Number(this.moveLeft);
-    this.direction.normalize();
+    if (this.direction.lengthSq() > 0) {
+      this.direction.normalize();
+    }
 
     const currentSpeed = this.speed * (this.isRunning ? this.runMultiplier : 1.0);
 
@@ -425,18 +560,26 @@ export class FirstPersonController {
     moveStep.addScaledVector(forward, -this.velocity.z * dt);
     moveStep.addScaledVector(right, this.velocity.x * dt);
 
-    // Apply X motion if no collision
-    const testPosX = this.camera.position.clone();
-    testPosX.x += moveStep.x;
-    if (!this.checkCollision(testPosX)) {
-      this.camera.position.x = testPosX.x;
-    }
+    if (moveStep.lengthSq() > 0.000001) {
+      // 1. Try full composite movement
+      const testPosXZ = this.camera.position.clone().add(moveStep);
+      if (!this.checkCollision(testPosXZ)) {
+        this.camera.position.copy(testPosXZ);
+      } else {
+        // 2. Wall sliding: try X alone
+        const testPosX = this.camera.position.clone();
+        testPosX.x += moveStep.x;
+        if (!this.checkCollision(testPosX)) {
+          this.camera.position.x = testPosX.x;
+        }
 
-    // Apply Z motion if no collision
-    const testPosZ = this.camera.position.clone();
-    testPosZ.z += moveStep.z;
-    if (!this.checkCollision(testPosZ)) {
-      this.camera.position.z = testPosZ.z;
+        // 3. Wall sliding: try Z alone
+        const testPosZ = this.camera.position.clone();
+        testPosZ.z += moveStep.z;
+        if (!this.checkCollision(testPosZ)) {
+          this.camera.position.z = testPosZ.z;
+        }
+      }
     }
 
     // Update Y elevation (smooth stairs ramp or floor height)
@@ -463,6 +606,10 @@ export class FirstPersonController {
     this.domElement.removeEventListener('mousedown', this.boundMouseDown);
     window.removeEventListener('mouseup', this.boundMouseUp);
     this.domElement.removeEventListener('wheel', this.boundWheel);
+    this.domElement.removeEventListener('touchstart', this.boundTouchStart);
+    this.domElement.removeEventListener('touchmove', this.boundTouchMove);
+    this.domElement.removeEventListener('touchend', this.boundTouchEnd);
+    this.domElement.removeEventListener('touchcancel', this.boundTouchEnd);
     document.removeEventListener('pointerlockchange', this.boundPointerLockChange);
   }
 }

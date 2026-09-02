@@ -1,9 +1,10 @@
 import React, { useState, useRef } from 'react';
-import { FloorPlanData, LLMProviderConfig } from '../types';
+import { FloorPlanData, LLMProviderConfig, AIStreamInputPayload } from '../types';
 import { SAMPLE_PLANS } from '../data/samples';
 import { PROVIDERS, getDefaultLLMConfig, getSavedLLMConfig } from '../data/llmProviders';
-import { extractFloorPlan } from '../utils/aiClient';
+import { extractFloorPlanStream } from '../utils/aiClient';
 import { optimizeFloorPlanImage } from '../utils/imageOptimizer';
+import { AIStreamInspector } from './AIStreamInspector';
 import {
   Upload,
   Sparkles,
@@ -19,6 +20,7 @@ import {
   ImageIcon,
   Loader2,
   RefreshCw,
+  Terminal,
 } from 'lucide-react';
 
 interface UploaderProps {
@@ -51,6 +53,14 @@ export const Uploader: React.FC<UploaderProps> = ({
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionStep, setExtractionStep] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+
+  // 3-Box Real-Time Stream Inspector State
+  const [isInspectorOpen, setIsInspectorOpen] = useState<boolean>(false);
+  const [inputPayload, setInputPayload] = useState<AIStreamInputPayload | null>(null);
+  const [reasoningStream, setReasoningStream] = useState<string>('');
+  const [rawContentStream, setRawContentStream] = useState<string>('');
+  const [extractedPlan, setExtractedPlan] = useState<FloorPlanData | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -111,6 +121,10 @@ export const Uploader: React.FC<UploaderProps> = ({
     setIsExtracting(true);
     setError(null);
     setExtractionStep(0);
+    setReasoningStream('');
+    setRawContentStream('');
+    setExtractedPlan(null);
+    setIsInspectorOpen(true); // Open the 3-Box Response Inspector!
 
     // Step simulation intervals for responsive feedback
     const interval = setInterval(() => {
@@ -118,9 +132,34 @@ export const Uploader: React.FC<UploaderProps> = ({
     }, 1500);
 
     try {
-      const plan = await extractFloorPlan(selectedImage, mimeType, userPrompt, activeLlmConfig);
+      const plan = await extractFloorPlanStream(
+        selectedImage,
+        mimeType,
+        userPrompt,
+        activeLlmConfig,
+        {
+          onInput: (input) => {
+            setInputPayload(input);
+          },
+          onReasoningChunk: (_chunk, accumulated) => {
+            setReasoningStream(accumulated);
+          },
+          onContentChunk: (_chunk, accumulated) => {
+            setRawContentStream(accumulated);
+          },
+          onDone: (finalPlan, rawText) => {
+            setExtractedPlan(finalPlan);
+            if (rawText) setRawContentStream(rawText);
+          },
+          onError: (errMsg) => {
+            setError(errMsg);
+          },
+        }
+      );
+
       clearInterval(interval);
-      onPlanExtracted(plan, selectedImage);
+      setExtractedPlan(plan);
+      // Plan is ready in inspector
     } catch (err: any) {
       clearInterval(interval);
       console.error('AI extraction error:', err);
@@ -138,6 +177,15 @@ export const Uploader: React.FC<UploaderProps> = ({
       }
     } finally {
       setIsExtracting(false);
+    }
+  };
+
+  const handleApplyPlanFromInspector = (plan: FloorPlanData) => {
+    setIsInspectorOpen(false);
+    if (selectedImage) {
+      onPlanExtracted(plan, selectedImage);
+    } else {
+      onPlanExtracted(plan);
     }
   };
 
@@ -407,6 +455,33 @@ export const Uploader: React.FC<UploaderProps> = ({
           ))}
         </div>
       </div>
+
+      {/* Floating 3-Box Stream Inspector Button (if active or generated) */}
+      {(isExtracting || rawContentStream || reasoningStream) && !isInspectorOpen && (
+        <div className="fixed bottom-20 md:bottom-6 right-4 sm:right-8 z-30 animate-bounce">
+          <button
+            onClick={() => setIsInspectorOpen(true)}
+            className="flex items-center space-x-2 px-4 py-2.5 bg-neutral-900/95 hover:bg-neutral-800 text-amber-400 font-bold text-xs rounded-full border border-amber-500/50 shadow-2xl backdrop-blur-xl transition"
+          >
+            <Sparkles className="w-4 h-4 animate-spin" />
+            <span>Open AI Stream Inspector (3-Box View)</span>
+          </button>
+        </div>
+      )}
+
+      {/* 3-Box Response Stream Inspector Modal */}
+      <AIStreamInspector
+        isOpen={isInspectorOpen}
+        onClose={() => setIsInspectorOpen(false)}
+        inputPayload={inputPayload}
+        reasoningStream={reasoningStream}
+        rawContentStream={rawContentStream}
+        isStreaming={isExtracting}
+        error={error}
+        parsedPlan={extractedPlan}
+        onApplyPlan={handleApplyPlanFromInspector}
+        onRetry={handleStartExtraction}
+      />
     </div>
   );
 };
